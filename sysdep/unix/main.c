@@ -38,8 +38,6 @@
 #include "filter/filter.h"
 #include "filter/data.h"
 
-#include "test/birdtest.h"
-
 #include "unix.h"
 #include "krt.h"
 
@@ -826,9 +824,6 @@ parse_args(int argc, char **argv)
       case 'h':
 	display_help();
 	break;
-      case 't':
-  test_launcher();
-  exit(0);
       default:
 	fputc('\n', stderr);
 	display_usage();
