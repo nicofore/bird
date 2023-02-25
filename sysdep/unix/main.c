@@ -37,6 +37,7 @@
 #include "conf/conf.h"
 #include "filter/filter.h"
 #include "filter/data.h"
+#include "test/unitest.h"
 
 #include "unix.h"
 #include "krt.h"
@@ -824,6 +825,9 @@ parse_args(int argc, char **argv)
       case 'h':
 	display_help();
 	break;
+      case 't':
+  test_launcher();
+  return 0;
       default:
 	fputc('\n', stderr);
 	display_usage();
@@ -851,11 +855,11 @@ main(int argc, char **argv)
   parse_args(argc, argv);
   log_switch(1, NULL, NULL);
 
-  net_init();
-  resource_init();
-  timer_init();
-  olock_init();
-  io_init();
+  net_init(); //Check des trucs sur la taille
+  resource_init(); //Ressource pool
+  timer_init(); //timer
+  olock_init(); //Lock
+  io_init(); 
   rt_init();
   if_init();
 //  roa_init();
