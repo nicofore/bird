@@ -37,6 +37,7 @@
 #include "conf/conf.h"
 #include "filter/filter.h"
 #include "filter/data.h"
+
 #include "test/unitest.h"
 
 #include "unix.h"
@@ -827,7 +828,7 @@ parse_args(int argc, char **argv)
 	break;
       case 't':
   test_launcher();
-  return 0;
+  exit(0);
       default:
 	fputc('\n', stderr);
 	display_usage();
