@@ -38,7 +38,7 @@
 #include "filter/filter.h"
 #include "filter/data.h"
 
-#include "test/unitest.h"
+#include "test/birdtest.h"
 
 #include "unix.h"
 #include "krt.h"
