@@ -179,4 +179,6 @@ int bt_is_char(byte c);
     .out_buf = bt_out_fmt_buf,	/* Global memory for this usage */	\
   })
 
+void test_launcher();
+
 #endif /* _BIRDTEST_H_ */

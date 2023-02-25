@@ -536,3 +536,11 @@ void sysdep_shutdown_done(void) {}
 int cli_get_command(cli *c UNUSED) { return 0; }
 void cli_write_trigger(cli *c UNUSED) {}
 cli *cmd_reconfig_stored_cli;
+
+
+void test_launcher(){
+
+    printf("Test launched\n");
+
+}
+
