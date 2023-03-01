@@ -15,7 +15,11 @@ main(int argc, char *argv[])
 {
   bt_init(argc, argv);
 
-  printf("Test was launched\n");
+  printf("%d\n", argc);
 
-  return 0;
+  for (int i = 0; i < argc; i++) {
+    printf("%s\n", argv[i]);
+  }
+
+  return bt_exit_value();
 }
