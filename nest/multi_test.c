@@ -40,13 +40,13 @@ t_fib_simple(void){
 
     bt_assert_msg(pointer_to_a, "Failed to add node in empty fib\n"); //Check if pointer is not null
 
-    bt_assert_msg(net_equal_ip4(pointer_to_a->n.addr, a), "Node received is not the node added\n");
+    bt_assert_msg(net_equal_ip4(&(pointer_to_a->n.addr), &a), "Node received is not the node added\n");
 
     pointer_to_a = fib_find(f, &a);
 
     bt_assert_msg(pointer_to_a, "Failed to find node which was added\n"); //Check if pointer is not null
 
-    bt_assert_msg(net_equal_ip4(pointer_to_a->n.addr, a), "Node found is not the node added\n");
+    bt_assert_msg(net_equal_ip4(&(pointer_to_a->n.addr), &a), "Node found is not the node added\n");
 
     return 1;
 }
