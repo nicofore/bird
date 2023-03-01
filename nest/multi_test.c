@@ -106,6 +106,7 @@ main(int argc, char *argv[])
   bt_init(argc, argv);
 
   bt_test_suite(t_fib_simple, "Testing Simple operation fib");
+  bt_test_suite(t_fib_10000_address, "Testing Adding/get/remove operation  operation fib");
 
   return bt_exit_value();
 }
