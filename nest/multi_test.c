@@ -24,10 +24,10 @@ t_fib_simple(void){
 
     pool *p = rp_new(&root_pool, "helper_pool");
 
-    struct fib *f = lp_alloc(p, sizeof(struct fib));
+    struct fib *f = mb_lloc(p, sizeof(struct fib));
 
     //Initialize the fib
-    fib_init(f, lp, NET_IP4, sizeof(net), OFFSETOF(net, n), 0, NULL);
+    fib_init(f, p, NET_IP4, sizeof(net), OFFSETOF(net, n), 0, NULL);
 
     //printf("Offset of net_addr_ip4 is %u\n", OFFSETOF(net, n)); Result is 8 (a pointer)
 
@@ -55,7 +55,7 @@ t_fib_simple(void){
 
     fib_free(f);
     printf("7\n");
-    rfree(p);
+    pool_free(p);
     printf("8\n");
 
     return 1;
@@ -69,7 +69,7 @@ static int t_fib_10000_address(void){
 
     pool *p = rp_new(&root_pool, "helper_pool");
 
-    struct fib *f = lp_alloc(p, sizeof(struct fib));
+    struct fib *f = mb_lloc(p, sizeof(struct fib));
 
     //Initialize the fib
     fib_init(f, lp, NET_IP4, sizeof(net), OFFSETOF(net, n), 0, NULL);
@@ -97,7 +97,7 @@ static int t_fib_10000_address(void){
     bt_assert_msg(f->entries == 0, "Fib count is not 0 after removing every entries\n");
 
     fib_free(f);
-    rfree(p);
+    pool_free(p);
 
     return 1;
 
