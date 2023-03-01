@@ -37,19 +37,26 @@ t_fib_simple(void){
 
     //Is a pointer to the fib node with a rte* before it(in memory address)
     net* pointer_to_a = fib_get(f, &a);
+    printf("1\n");
 
     bt_assert_msg(pointer_to_a, "Failed to add node in empty fib\n"); //Check if pointer is not null
+    printf("2\n");
 
     bt_assert_msg(net_equal_ip4(&(pointer_to_a->n.addr), &a) == 0, "Node received is not the node added\n");
-
+    printf("3\n");
     pointer_to_a = fib_find(f, &a);
+    printf("4\n");
 
     bt_assert_msg(pointer_to_a, "Failed to find node which was added\n"); //Check if pointer is not null
+    printf("5\n");
 
     bt_assert_msg(net_equal_ip4(&(pointer_to_a->n.addr) == 0, &a), "Node found is not the node added\n");
+    printf("6\n");
 
     fib_free(f);
+    printf("7\n");
     rfree(lp);
+    printf("8\n");
 
     return 1;
 }
