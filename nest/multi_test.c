@@ -22,9 +22,9 @@ t_fib_simple(void){
 
     resource_init(); //Initialize the root pool
 
-    struct linpool *lp = lp_new_default(&root_pool);
+    pool *p = rp_new(&root_pool, "helper_pool");
 
-    struct fib *f = lp_alloc(lp, sizeof(struct fib));
+    struct fib *f = lp_alloc(p, sizeof(struct fib));
 
     //Initialize the fib
     fib_init(f, lp, NET_IP4, sizeof(net), OFFSETOF(net, n), 0, NULL);
@@ -55,7 +55,7 @@ t_fib_simple(void){
 
     fib_free(f);
     printf("7\n");
-    rfree(lp);
+    rfree(p);
     printf("8\n");
 
     return 1;
@@ -67,9 +67,9 @@ static int t_fib_10000_address(void){
     
     resource_init(); //Initialize the root pool
 
-    struct linpool *lp = lp_new_default(&root_pool);
+    pool *p = rp_new(&root_pool, "helper_pool");
 
-    struct fib *f = lp_alloc(lp, sizeof(struct fib));
+    struct fib *f = lp_alloc(p, sizeof(struct fib));
 
     //Initialize the fib
     fib_init(f, lp, NET_IP4, sizeof(net), OFFSETOF(net, n), 0, NULL);
@@ -97,7 +97,7 @@ static int t_fib_10000_address(void){
     bt_assert_msg(f->entries == 0, "Fib count is not 0 after removing every entries\n");
 
     fib_free(f);
-    rfree(lp);
+    rfree(p);
 
     return 1;
 
