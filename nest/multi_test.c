@@ -1,6 +1,6 @@
 #include "test/birdtest.h"
 #include "test/bt-utils.h"
-#include "lib/ressource.h"
+#include "lib/resource.h"
 
 #include "nest/route.h"
 
