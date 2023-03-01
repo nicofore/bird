@@ -58,8 +58,8 @@ struct fib {
   uint hash_order;			/* Binary logarithm of hash_size */
   uint hash_shift;			/* 32 - hash_order */
   uint addr_type;			/* Type of address data stored in fib (NET_*) */
-  uint node_size;			/* FIB node size, 0 for nonuniform */
-  uint node_offset;			/* Offset of fib_node struct inside of user data */
+  uint node_size;			/* FIB node size, 0 for nonuniform,    SIZE OF WHAT IS INSIDE -> usualy a net which contain a fib node)  look like {struct rte*, fib_node}*/
+  uint node_offset;			/* Offset of fib_node struct inside of user data,   WITH OFFSETOF(), offset between user data and fib node  (usually the pointer rte) */
   uint entries;				/* Number of entries */
   uint entries_min, entries_max;	/* Entry count limits (else start rehashing) */
   fib_init_fn init;			/* Constructor */
