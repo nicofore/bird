@@ -1,5 +1,6 @@
 #include "test/birdtest.h"
 #include "test/bt-utils.h"
+#include "lib/ressource.h"
 
 #include "nest/route.h"
 
@@ -36,27 +37,19 @@ t_fib_simple(void){
     net_addr_ip4 a = NET_ADDR_IP4(2040257024, 24); //ip of 121.155.218.0/24
 
     //Is a pointer to the fib node with a rte* before it(in memory address)
-    net* pointer_to_a = fib_get(f, &a);
-    printf("1\n");
+    net* pointer_to_a = fib_get(f, (net_addr*) &a);
 
     bt_assert_msg(pointer_to_a, "Failed to add node in empty fib\n"); //Check if pointer is not null
-    printf("2\n");
 
     bt_assert_msg(net_equal_ip4((net_addr_ip4*) &(pointer_to_a->n.addr), &a) == 0, "Node received is not the node added\n");
-    printf("3\n");
-    pointer_to_a = fib_find(f, &a);
-    printf("4\n");
+    pointer_to_a = fib_find(f, (net_addr*) &a);
 
     bt_assert_msg(pointer_to_a, "Failed to find node which was added\n"); //Check if pointer is not null
-    printf("5\n");
 
     bt_assert_msg(net_equal_ip4((net_addr_ip4*) &(pointer_to_a->n.addr[0]) , &a) == 0, "Node found is not the node added\n");
-    printf("6\n");
 
     fib_free(f);
-    printf("7\n");
     pool_free(p);
-    printf("8\n");
 
     return 1;
 }
@@ -72,7 +65,7 @@ static int t_fib_10000_address(void){
     struct fib *f = mb_lloc(p, sizeof(struct fib));
 
     //Initialize the fib
-    fib_init(f, lp, NET_IP4, sizeof(net), OFFSETOF(net, n), 0, NULL);
+    fib_init(f, p, NET_IP4, sizeof(net), OFFSETOF(net, n), 0, NULL);
 
     
 
@@ -80,7 +73,7 @@ static int t_fib_10000_address(void){
 
     for (int i = 0; i < 10000; i++){
         net_addr_ip4 a = NET_ADDR_IP4(i, 32);
-        net* entry = fib_get(f, &a);
+        net* entry = fib_get(f, (net_addr*) &a);
         bt_assert_msg(entry, "Failed to add node %d in t_fib_10000_address\n", i);
     }
 
@@ -88,7 +81,7 @@ static int t_fib_10000_address(void){
 
     for (int i = 0; i < 10000; i++){
         net_addr_ip4 a = NET_ADDR_IP4(i, 32);
-        net* entry = fib_find(f, &a);
+        net* entry = fib_find(f, (net_addr*) &a);
         bt_assert_msg(entry, "Failed to find node %d in t_fib_10000_address\n", i);
         bt_assert_msg(net_equal_ip4((net_addr_ip4*) &(entry->n.addr[0]), &a) == 0, "Entry found is not the entry added\n");
         fib_delete(f, entry);
