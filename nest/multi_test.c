@@ -29,7 +29,7 @@ t_fib_simple(void){
     //Initialize the fib
     fib_init(f, lp, NET_IP4, sizeof(net), OFFSETOF(net, n), 0, NULL);
 
-    printf("Offset of net_addr_ip4 is %u\n", OFFSETOF(net, n));
+    //printf("Offset of net_addr_ip4 is %u\n", OFFSETOF(net, n)); Result is 8 (a pointer)
 
     //Add a route
     
@@ -48,9 +48,53 @@ t_fib_simple(void){
 
     bt_assert_msg(net_equal_ip4(&(pointer_to_a->n.addr), &a), "Node found is not the node added\n");
 
+    fib_free(f);
+    rfree(lp);
+
     return 1;
 }
 
+
+static int t_fib_10000_address(void){
+    
+    
+    resource_init(); //Initialize the root pool
+
+    struct linpool *lp = lp_new_default(&root_pool);
+
+    struct fib *f = lp_alloc(lp, sizeof(struct fib));
+
+    //Initialize the fib
+    fib_init(f, lp, NET_IP4, sizeof(net), OFFSETOF(net, n), 0, NULL);
+
+    
+
+    //Add a route
+
+    for (int i = 0; i < 10000; i++){
+        net_addr_ip4 a = NET_ADDR_IP4(i, 32);
+        net* entry = fib_get(f, &a);
+        bt_assert_msg(entry, "Failed to add node %d in t_fib_10000_address\n", i);
+    }
+
+    bt_assert_msg(f->entries == 10000, "Fib count is not 10000\n");
+
+    for (int i = 0; i < 10000; i++){
+        net_addr_ip4 a = NET_ADDR_IP4(i, 32);
+        net* entry = fib_find(f, &a);
+        bt_assert_msg(entry, "Failed to find node %d in t_fib_10000_address\n", i);
+        bt_assert_msg(net_equal_ip4(&(pointer_to_a->n.addr), &a), "Entry found is not the entry added\n");
+        fib_delete(f, entry);
+    }
+
+    bt_assert_msg(f->entries == 0, "Fib count is not 0 after removing every entries\n");
+
+    fib_free(f);
+    rfree(lp);
+
+    return 1;
+
+}
 
 
 
