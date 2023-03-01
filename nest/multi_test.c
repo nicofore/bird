@@ -50,7 +50,7 @@ t_fib_simple(void){
     bt_assert_msg(pointer_to_a, "Failed to find node which was added\n"); //Check if pointer is not null
     printf("5\n");
 
-    bt_assert_msg(net_equal_ip4(&(pointer_to_a->n.addr) == 0, &a), "Node found is not the node added\n");
+    bt_assert_msg(net_equal_ip4(&(pointer_to_a->n.addr) , &a) == 0, "Node found is not the node added\n");
     printf("6\n");
 
     fib_free(f);
