@@ -26,29 +26,40 @@ t_fib_simple(void){
     
     net_addr_ip4 a = NET_ADDR_IP4(2040257024, 24); //ip of 121.155.218.0/24
 
+    printf("Prefix len is %u\n", a.pxlen);
+    printf("Len is %u\n", a.length);
+    printf("Address is %u\n", a.addr);
+
+
     //Is a pointer to the fib node with a rte* before it(in memory address)
     net* pointer_to_a = fib_get(f, (net_addr*) &a);
 
-    if (pointer_to_a == NULL) printf("Pointer is not null\n");
+    if (pointer_to_a == NULL){
+        printf("Failed to add node in empty fib\n");
+    }
 
     bt_assert_msg(pointer_to_a != NULL, "Failed to add node in empty fib\n"); //Check if pointer is not null
 
-    if (net_equal_ip4((net_addr_ip4*) &(pointer_to_a->n.addr), &a) != 0) printf("Node received is not the node added\n");
+    printf("Prefix len received is %u\n", pointer_to_a->n.pxlen);
+    printf("Len received is %u\n", pointer_to_a->n.len);
+    printf("Address received is %u\n", pointer_to_a->n.pxlen);
+    
     bt_assert_msg(net_equal_ip4((net_addr_ip4*) &(pointer_to_a->n.addr), &a) == 0, "Node received is not the node added\n");
 
     pointer_to_a = fib_find(f, (net_addr*) &a);
 
-    if (pointer_to_a != NULL) printf("Failed to find node which was added\n");
+    printf("Prefix len found is %u\n", pointer_to_a->n.pxlen);
+    printf("Len found is %u\n", pointer_to_a->n.len);
+    printf("Address found is %u\n", pointer_to_a->n.pxlen);
+
+    
     bt_assert_msg(pointer_to_a!= NULL, "Failed to find node which was added\n"); //Check if pointer is not null
 
-    if (net_equal_ip4((net_addr_ip4*) &(pointer_to_a->n.addr), &a) != 0) printf("Node found is not the node added\n");
 
     bt_assert_msg(net_equal_ip4((net_addr_ip4*) &(pointer_to_a->n.addr), &a) == 0, "Node found is not the node added\n");
 
     fib_free(f);
-    printf("Test finished\n");
     
-
     return 1;
 }
 
