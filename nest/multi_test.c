@@ -29,16 +29,24 @@ t_fib_simple(void){
     //Is a pointer to the fib node with a rte* before it(in memory address)
     net* pointer_to_a = fib_get(f, (net_addr*) &a);
 
-    bt_assert_msg(pointer_to_a, "Failed to add node in empty fib\n"); //Check if pointer is not null
+    if (pointer_to_a == NULL) printf("Pointer is not null\n");
 
+    bt_assert_msg(pointer_to_a != NULL, "Failed to add node in empty fib\n"); //Check if pointer is not null
+
+    if (net_equal_ip4((net_addr_ip4*) &(pointer_to_a->n.addr), &a) != 0) printf("Node received is not the node added\n");
     bt_assert_msg(net_equal_ip4((net_addr_ip4*) &(pointer_to_a->n.addr), &a) == 0, "Node received is not the node added\n");
+
     pointer_to_a = fib_find(f, (net_addr*) &a);
 
-    bt_assert_msg(pointer_to_a, "Failed to find node which was added\n"); //Check if pointer is not null
+    if (pointer_to_a != NULL) printf("Failed to find node which was added\n");
+    bt_assert_msg(pointer_to_a!= NULL, "Failed to find node which was added\n"); //Check if pointer is not null
 
-    bt_assert_msg(net_equal_ip4((net_addr_ip4*) &(pointer_to_a->n.addr) , &a) == 0, "Node found is not the node added\n");
+    if (net_equal_ip4((net_addr_ip4*) &(pointer_to_a->n.addr), &a) != 0) printf("Node found is not the node added\n");
+
+    bt_assert_msg(net_equal_ip4((net_addr_ip4*) &(pointer_to_a->n.addr), &a) == 0, "Node found is not the node added\n");
 
     fib_free(f);
+    printf("Test finished\n");
     
 
     return 1;
