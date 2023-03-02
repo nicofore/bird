@@ -28,7 +28,7 @@ t_fib_simple(void){
 
     printf("Prefix len is %u\n", a.pxlen);
     printf("Len is %u\n", a.length);
-    printf("Address is %u\n", a.addr);
+    printf("Prefix is %u\n", a.prefix);
 
 
     //Is a pointer to the fib node with a rte* before it(in memory address)
