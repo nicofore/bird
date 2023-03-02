@@ -44,7 +44,7 @@ t_fib_simple(void){
     printf("Len received is %u\n", pointer_to_a->n.addr[0].length);
     //printf("Address received is %u\n", pointer_to_a->n.addr[0].addr);
     
-    bt_assert_msg(net_equal((pointer_to_a->n.addr[0]), (net_addr*) (&a)) == 0, "Node received is not the node added\n");
+    bt_assert_msg(net_equal(&(pointer_to_a->n.addr[0]), (net_addr*) (&a)) == 0, "Node received is not the node added\n");
 
     pointer_to_a = fib_find(f, (net_addr*) &a);
 
