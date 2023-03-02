@@ -198,6 +198,7 @@ main(int argc, char *argv[])
 
   bt_test_suite(t_fib_simple, "Testing Simple operation fib");
   bt_test_suite(t_fib_10000_address, "Testing Adding/get/remove operation fib");
+  bt_test_suite(t_multi_thread, "Testing Adding/remove operation in multithreaded fib");
 
   return bt_exit_value();
 }
