@@ -102,7 +102,7 @@ static int t_fib_10000_address(void){
 }
 
 
-void* f_multi_Add(void* args){
+void* f_multi_Add(void* argus){
 
     threadArgs* args = (threadArgs*) argus;
 
@@ -117,7 +117,7 @@ void* f_multi_Add(void* args){
     
 }
 
-void* f_multi_remove(void* args){
+void* f_multi_remove(void* argus){
 
     threadArgs* args = (threadArgs*) argus;
 
