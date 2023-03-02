@@ -42,7 +42,7 @@ t_fib_simple(void){
 
     printf("Prefix len received is %u\n", pointer_to_a->n.addr[0].pxlen);
     printf("Len received is %u\n", pointer_to_a->n.addr[0].length);
-    //printf("Address received is %u\n", pointer_to_a->n.addr[0].addr);
+    printf("Address received is %u\n", (net_addr_ip4) pointer_to_a->n.addr[0].prefix);
     
     printf("First is %d\n", net_equal(&(pointer_to_a->n.addr), (net_addr*) (&a)) == 0);
     bt_assert_msg(net_equal(&(pointer_to_a->n.addr), (net_addr*) (&a)) == 0, "Node received is not the node added\n");
@@ -51,7 +51,7 @@ t_fib_simple(void){
 
     printf("Prefix len found is %u\n", pointer_to_a->n.addr[0].pxlen);
     printf("Len found is %u\n", pointer_to_a->n.addr[0].length);
-    //printf("Address found is %u\n", pointer_to_a->n.addr[0].addr);
+    printf("Address found is %u\n", (net_addr_ip4) pointer_to_a->n.addr[0].prefix);
 
     if (pointer_to_a == NULL){
         printf("Failed 2 to add node in empty fib\n");
