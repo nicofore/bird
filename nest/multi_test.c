@@ -40,17 +40,17 @@ t_fib_simple(void){
 
     bt_assert_msg(pointer_to_a != NULL, "Failed to add node in empty fib\n"); //Check if pointer is not null
 
-    printf("Prefix len received is %u\n", pointer_to_a->n.pxlen);
-    printf("Len received is %u\n", pointer_to_a->n.len);
-    printf("Address received is %u\n", pointer_to_a->n.pxlen);
+    printf("Prefix len received is %u\n", pointer_to_a->n.addr.pxlen);
+    printf("Len received is %u\n", pointer_to_a->n.addr.len);
+    printf("Address received is %u\n", pointer_to_a->n.addr.addr);
     
     bt_assert_msg(net_equal_ip4((net_addr_ip4*) &(pointer_to_a->n.addr), &a) == 0, "Node received is not the node added\n");
 
     pointer_to_a = fib_find(f, (net_addr*) &a);
 
-    printf("Prefix len found is %u\n", pointer_to_a->n.pxlen);
-    printf("Len found is %u\n", pointer_to_a->n.len);
-    printf("Address found is %u\n", pointer_to_a->n.pxlen);
+    printf("Prefix len found is %u\n", pointer_to_a->n.addr.pxlen);
+    printf("Len found is %u\n", pointer_to_a->n.addr.len);
+    printf("Address found is %u\n", pointer_to_a->n.addr.pxlen);
 
     
     bt_assert_msg(pointer_to_a!= NULL, "Failed to find node which was added\n"); //Check if pointer is not null
