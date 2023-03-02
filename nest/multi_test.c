@@ -44,8 +44,8 @@ t_fib_simple(void){
     printf("Len received is %u\n", pointer_to_a->n.addr[0].length);
     printf("Address received is %u\n", (net_addr_ip4) pointer_to_a->n.addr[0].prefix);
     
-    printf("First is %d\n", net_equal(&(pointer_to_a->n.addr), (net_addr*) (&a)) == 0);
-    bt_assert_msg(net_equal(&(pointer_to_a->n.addr), (net_addr*) (&a)) == 0, "Node received is not the node added\n");
+    printf("First is %d\n", net_equal(&(pointer_to_a->n.addr[0]), (net_addr*) (&a)) == 0);
+    bt_assert_msg(net_equal(&(pointer_to_a->n.addr[0]), (net_addr*) (&a)) == 0, "Node received is not the node added\n");
 
     pointer_to_a = fib_find(f, (net_addr*) &a);
 
@@ -58,8 +58,8 @@ t_fib_simple(void){
     }
     bt_assert_msg(pointer_to_a!= NULL, "Failed to find node which was added\n"); //Check if pointer is not null
 
-    printf("Second is %d\n", net_equal(&(pointer_to_a->n.addr), (net_addr*) (&a)) == 0);
-    bt_assert_msg(net_equal(&(pointer_to_a->n.addr), (net_addr*) (&a)) == 0, "Node found is not the node added\n");
+    printf("Second is %d\n", net_equal(&(pointer_to_a->n.addr[0]), (net_addr*) (&a)) == 0);
+    bt_assert_msg(net_equal(&(pointer_to_a->n.addr[0]), (net_addr*) (&a)) == 0, "Node found is not the node added\n");
 
     fib_free(f);
     
