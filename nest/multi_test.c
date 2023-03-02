@@ -40,26 +40,33 @@ t_fib_simple(void){
 
     bt_assert_msg(pointer_to_a != NULL, "Failed to add node in empty fib\n"); //Check if pointer is not null
 
-    printf("Prefix len received is %u\n", pointer_to_a->n.addr[0].pxlen);
-    printf("Len received is %u\n", pointer_to_a->n.addr[0].length);
-    printf("Address received is %u\n", ((net_addr_ip4) pointer_to_a->n.addr[0]).prefix);
+    net_addr *b = &(pointer_to_a->n.addr[0]);
+    net_addr_ip4 *c = (net_addr_ip4*) b;
+
+    printf("Prefix len received is %u\n", b->pxlen);
+    printf("Len received is %u\n", b->length);
+    printf("Address received is %u\n", c->prefix);
     
-    printf("First is %d\n", net_equal(&(pointer_to_a->n.addr[0]), (net_addr*) (&a)) == 0);
-    bt_assert_msg(net_equal(&(pointer_to_a->n.addr[0]), (net_addr*) (&a)) == 0, "Node received is not the node added\n");
+    printf("First is %d\n", net_equal(b, (net_addr*) (&a)) == 0);
+    bt_assert_msg(net_equal(b, (net_addr*) (&a)) == 0, "Node received is not the node added\n");
 
     pointer_to_a = fib_find(f, (net_addr*) &a);
-
-    printf("Prefix len found is %u\n", pointer_to_a->n.addr[0].pxlen);
-    printf("Len found is %u\n", pointer_to_a->n.addr[0].length);
-    printf("Address found is %u\n", ((net_addr_ip4) (pointer_to_a->n.addr[0])).prefix);
 
     if (pointer_to_a == NULL){
         printf("Failed 2 to add node in empty fib\n");
     }
     bt_assert_msg(pointer_to_a!= NULL, "Failed to find node which was added\n"); //Check if pointer is not null
 
-    printf("Second is %d\n", net_equal(&(pointer_to_a->n.addr[0]), (net_addr*) (&a)) == 0);
-    bt_assert_msg(net_equal(&(pointer_to_a->n.addr[0]), (net_addr*) (&a)) == 0, "Node found is not the node added\n");
+    b = &(pointer_to_a->n.addr[0]);
+    c = (net_addr_ip4*) b;
+
+    printf("Prefix len found is %u\n", b->pxlen);
+    printf("Len found is %u\n", b->length);
+    printf("Address found is %u\n", c->prefix);
+
+
+    printf("Second is %d\n", net_equal(b, (net_addr*) (&a)) == 0);
+    bt_assert_msg(net_equal(b, (net_addr*) (&a)) == 0, "Node found is not the node added\n");
 
     fib_free(f);
     
