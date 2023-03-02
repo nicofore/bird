@@ -6,16 +6,7 @@
 
 #include <stdio.h>
 
-//Function to test
 
-void fib_init(struct fib *f, pool *p, uint addr_type, uint node_size, uint node_offset, uint hash_order, fib_init_fn init);
-void *fib_find(struct fib *, const net_addr *);	/* Find or return NULL if doesn't exist */
-void *fib_get_chain(struct fib *f, const net_addr *a); /* Find first node in linked list from hash table */
-void *fib_get(struct fib *, const net_addr *);	/* Find or create new if nonexistent */
-void *fib_route(struct fib *, const net_addr *); /* Longest-match routing lookup */
-void fib_delete(struct fib *, void *);	/* Remove fib entry */
-void fib_free(struct fib *);		/* Destroy the fib */
-void fib_check(struct fib *);		/* Consistency check for debugging */
 
 
 static int
@@ -23,12 +14,11 @@ t_fib_simple(void){
 
     resource_init(); //Initialize the root pool
 
-    pool *p = rp_new(&root_pool, "helper_pool");
 
-    struct fib *f = mb_lloc(p, sizeof(struct fib));
+    struct fib *f = mb_alloc(&root_pool, sizeof(struct fib));
 
     //Initialize the fib
-    fib_init(f, p, NET_IP4, sizeof(net), OFFSETOF(net, n), 0, NULL);
+    fib_init(f, &root_pool, NET_IP4, sizeof(net), OFFSETOF(net, n), 0, NULL);
 
     //printf("Offset of net_addr_ip4 is %u\n", OFFSETOF(net, n)); Result is 8 (a pointer)
 
@@ -49,7 +39,7 @@ t_fib_simple(void){
     bt_assert_msg(net_equal_ip4((net_addr_ip4*) &(pointer_to_a->n.addr[0]) , &a) == 0, "Node found is not the node added\n");
 
     fib_free(f);
-    pool_free(p);
+    
 
     return 1;
 }
@@ -60,12 +50,12 @@ static int t_fib_10000_address(void){
     
     resource_init(); //Initialize the root pool
 
-    pool *p = rp_new(&root_pool, "helper_pool");
+    
 
-    struct fib *f = mb_lloc(p, sizeof(struct fib));
+    struct fib *f = mb_alloc(&root_pool, sizeof(struct fib));
 
     //Initialize the fib
-    fib_init(f, p, NET_IP4, sizeof(net), OFFSETOF(net, n), 0, NULL);
+    fib_init(f, &root_pool, NET_IP4, sizeof(net), OFFSETOF(net, n), 0, NULL);
 
     
 
@@ -90,7 +80,6 @@ static int t_fib_10000_address(void){
     bt_assert_msg(f->entries == 0, "Fib count is not 0 after removing every entries\n");
 
     fib_free(f);
-    pool_free(p);
 
     return 1;
 
