@@ -26,6 +26,7 @@ t_fib_simple(void){
     
     net_addr_ip4 a = NET_ADDR_IP4(2040257024, 24); //ip of 121.155.218.0/24
 
+    printf("Type is %u\n", a.type);
     printf("Prefix len is %u\n", a.pxlen);
     printf("Len is %u\n", a.length);
     printf("Prefix is %u\n", a.prefix);
@@ -43,6 +44,7 @@ t_fib_simple(void){
     net_addr *b = &(pointer_to_a->n.addr[0]);
     net_addr_ip4 *c = (net_addr_ip4*) b;
 
+    printf("Type is %u\n", b->type);
     printf("Prefix len received is %u\n", b->pxlen);
     printf("Len received is %u\n", b->length);
     printf("Address received is %u\n", c->prefix);
@@ -60,6 +62,7 @@ t_fib_simple(void){
     b = &(pointer_to_a->n.addr[0]);
     c = (net_addr_ip4*) b;
 
+    printf("Type is %u\n", b->type);
     printf("Prefix len found is %u\n", b->pxlen);
     printf("Len found is %u\n", b->length);
     printf("Address found is %u\n", c->prefix);
