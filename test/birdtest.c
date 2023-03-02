@@ -65,7 +65,7 @@ bt_init(int argc, char *argv[])
 
   initstate(BT_RANDOM_SEED, (char *) bt_random_state, sizeof(bt_random_state));
 
-  bt_verbose = 1;
+  bt_verbose = 2;
   bt_filename = argv[0];
   bt_result = 1;
   bt_test_id = NULL;

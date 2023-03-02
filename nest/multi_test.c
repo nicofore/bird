@@ -36,7 +36,7 @@ t_fib_simple(void){
 
     bt_assert_msg(pointer_to_a, "Failed to find node which was added\n"); //Check if pointer is not null
 
-    bt_assert_msg(net_equal_ip4((net_addr_ip4*) &(pointer_to_a->n.addr[0]) , &a) == 0, "Node found is not the node added\n");
+    bt_assert_msg(net_equal_ip4((net_addr_ip4*) &(pointer_to_a->n.addr) , &a) == 0, "Node found is not the node added\n");
 
     fib_free(f);
     
@@ -73,7 +73,7 @@ static int t_fib_10000_address(void){
         net_addr_ip4 a = NET_ADDR_IP4(i, 32);
         net* entry = fib_find(f, (net_addr*) &a);
         bt_assert_msg(entry, "Failed to find node %d in t_fib_10000_address\n", i);
-        bt_assert_msg(net_equal_ip4((net_addr_ip4*) &(entry->n.addr[0]), &a) == 0, "Entry found is not the entry added\n");
+        bt_assert_msg(net_equal_ip4((net_addr_ip4*) &(entry->n.addr), &a) == 0, "Entry found is not the entry added\n");
         fib_delete(f, entry);
     }
 
