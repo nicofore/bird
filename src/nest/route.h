@@ -9,6 +9,8 @@
 #ifndef _BIRD_ROUTE_H_
 #define _BIRD_ROUTE_H_
 
+#include <stdatomic.h>
+
 #include "lib/lists.h"
 #include "lib/bitmap.h"
 #include "lib/resource.h"
@@ -35,16 +37,14 @@ struct cli;
  */
 
 struct fib_node {
-  struct fib_node *next;		/* Next in hash chain */
-  struct fib_iterator *readers;		/* List of readers of this node */
+  atomic_uintptr_t** next;		/* Next in hash chain */
+  atomic_char sentinel;      /* If node is a sentinel and number of pointer to address*/
   net_addr addr[0];
 };
 
 struct fib_iterator {			/* See lib/slists.h for an explanation */
-  struct fib_iterator *prev, *next;	/* Must be synced with struct fib_node! */
-  byte efef;				/* 0xff to distinguish between iterator and node */
-  byte pad[3];
   struct fib_node *node;		/* Or NULL if freshly merged */
+  byte soft_link_row; 
   uint hash;
 };
 
@@ -53,15 +53,18 @@ typedef void (*fib_init_fn)(void *);
 struct fib {
   pool *fib_pool;			/* Pool holding all our data */
   slab *fib_slab;			/* Slab holding all fib nodes */
-  struct fib_node **hash_table;		/* Node hash table */
-  uint hash_size;			/* Number of hash table entries (a power of two) */
-  uint hash_order;			/* Binary logarithm of hash_size */
-  uint hash_shift;			/* 32 - hash_order */
+  atomic_uintptr_t* hash_table;		/* Node hash table */
+  atomic_bool* reserved_row;    /* Row of reserved in the hazard pointer */
+  atomic_uintptr_t** soft_links; /* Soft links used */
+  atomic_uintptr_t** hand_overs; /* Hand hovers of softlinks */
+  atomic_uint hash_size;			/* Number of hash table entries (a power of two) */
+  atomic_uint hash_order;			/* Binary logarithm of hash_size */
+  atomic_uint hash_shift;			/* 32 - hash_order */
   uint addr_type;			/* Type of address data stored in fib (NET_*) */
   uint node_size;			/* FIB node size, 0 for nonuniform,    SIZE OF WHAT IS INSIDE -> usualy a net which contain a fib node)  look like {struct rte*, fib_node}*/
   uint node_offset;			/* Offset of fib_node struct inside of user data,   WITH OFFSETOF(), offset between user data and fib node  (usually the pointer rte) */
-  uint entries;				/* Number of entries */
-  uint entries_min, entries_max;	/* Entry count limits (else start rehashing) */
+  atomic_uint entries;				/* Number of entries */
+  atomic_uint entries_min, entries_max;	/* Entry count limits (else start rehashing) */
   fib_init_fn init;			/* Constructor */
 };
 

@@ -1,0 +1,7 @@
+{
+    "files.associations": {
+        "stdio.h": "c",
+        "bt-utils.h": "c",
+        "sha256.h": "c"
+    }
+}

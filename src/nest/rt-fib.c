@@ -107,23 +107,48 @@
 #define HASH_LO_STEP 2
 #define HASH_LO_MIN 10
 
+#define MAX_THREADS 32
+
 
 static void
 fib_ht_alloc(struct fib *f)
 {
-  f->hash_size = 1 << f->hash_order;
-  f->hash_shift = 32 - f->hash_order;
+  atomic_store(&(f->hash_size), 1 << atomic_load(&(f->hash_order)));
+  atomic_store(&(f->hash_shift), 32 - atomic_load(&(f->hash_order)));
   if (f->hash_order > HASH_HI_MAX - HASH_HI_STEP)
-    f->entries_max = ~0;
+    atomic_store(&(f->entries_max), ~0);
   else
-    f->entries_max = f->hash_size HASH_HI_MARK;
+    atomic_store(&(f->entries_max), atomic_load(&(f->hash_size)) HASH_HI_MARK);
   if (f->hash_order < HASH_LO_MIN + HASH_LO_STEP)
-    f->entries_min = 0;
+    atomic_store(&(f->entries_min), 0);
   else
-    f->entries_min = f->hash_size HASH_LO_MARK;
+    atomic_store(&(f->entries_min), atomic_load(&(f->hash_size)) HASH_LO_MARK);
   DBG("Allocating FIB hash of order %d: %d entries, %d low, %d high\n",
-      f->hash_order, f->hash_size, f->entries_min, f->entries_max);
-  f->hash_table = mb_alloc(f->fib_pool, f->hash_size * sizeof(struct fib_node *));
+      atomic_load(&(f->hash_order)), atomic_load(&(f->hash_size)), atomic_load(&(f->entries_min)), atomic_load(&(f->entries_max)));
+    
+  atomic_store(&(f->hash_table), mb_alloc(f->fib_pool, atomic_load(&(f->hash_size)) * sizeof(struct fib_node)));
+  //Put to zero
+  for (uint i = 0; i < atomic_load(&(f->hash_size)); i++)
+    atomic_store(&(f->hash_table[i]), NULL);
+  
+  //Allocate the reserved row
+  atomic_store(&(f->reserved_row), mb_alloc(f->fib_pool, sizeof(atomic_bool) * MAX_THREADS));
+  for (uint i = 0; i < MAX_THREADS; i++)
+    atomic_store(&(f->reserved_row[i]), false);
+
+  //Allocate the softlinks and handovers
+  atomic_store(&(f->softlinks), mb_alloc(f->fib_pool, sizeof(atomic_uintptr *) * MAX_THREADS));
+  atomic_store(&(f->handovers), mb_alloc(f->fib_pool, sizeof(atomic_uintptr *) * MAX_THREADS));
+  for (uint i = 0; i < MAX_THREADS; i++)
+    {
+      atomic_store(&(f->softlinks[i]), mb_alloc(f->fib_pool, 2*sizeof(atomic_uintptr)));
+      atomic_store(&(f->handovers[i]), mb_alloc(f->fib_pool, 2*sizeof(atomic_uintptr)));
+      atomic_store(&(f->softlinks[i][0]), NULL);
+      atomic_store(&(f->softlinks[i][1]), NULL);
+      atomic_store(&(f->handovers[i][0]), NULL);
+      atomic_store(&(f->handovers[i][1]), NULL);
+    }
+  
 }
 
 static inline void
@@ -159,11 +184,13 @@ fib_init(struct fib *f, pool *p, uint addr_type, uint node_size, uint node_offse
   f->addr_type = addr_type;
   f->node_size = node_size;
   f->node_offset = node_offset;
-  f->hash_order = hash_order;
+
+  atomic_store(&(f->hash_order), hash_order);
+
   fib_ht_alloc(f);
-  bzero(f->hash_table, f->hash_size * sizeof(struct fib_node *));
-  f->entries = 0;
-  f->entries_min = 0;
+
+  atomic_store(&(f->entries), 0);
+  atomic_store(&(f->entries_min), 0);
   f->init = init;
 }
 
