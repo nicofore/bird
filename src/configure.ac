@@ -158,7 +158,7 @@ if test "$bird_cflags_default" = yes ; then
   fi
 
   if test "$bird_cv_c_lto" = yes; then
-    CFLAGS="$CFLAGS -flto"
+    CFLAGS="$CFLAGS -flto -g"
     LDFLAGS="$LDFLAGS -flto=4 -g"
   else
     LDFLAGS="$LDFLAGS -g"

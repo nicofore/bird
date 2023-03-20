@@ -6,3 +6,4 @@ start:
 
 stop:
 	docker stop bird
+	docker rm bird

@@ -37,7 +37,7 @@ struct cli;
  */
 
 struct fib_node {
-  atomic_uintptr_t** next;		/* Next in hash chain */
+  atomic_uintptr_t next;		/* Next in hash chain */
   atomic_char sentinel;      /* If node is a sentinel and number of pointer to address*/
   net_addr addr[0];
 };
@@ -60,12 +60,14 @@ struct fib {
   atomic_uint hash_size;			/* Number of hash table entries (a power of two) */
   atomic_uint hash_order;			/* Binary logarithm of hash_size */
   atomic_uint hash_shift;			/* 32 - hash_order */
+  atomic_uint hash_mask;			/* hash_size - 1 */
   uint addr_type;			/* Type of address data stored in fib (NET_*) */
   uint node_size;			/* FIB node size, 0 for nonuniform,    SIZE OF WHAT IS INSIDE -> usualy a net which contain a fib node)  look like {struct rte*, fib_node}*/
   uint node_offset;			/* Offset of fib_node struct inside of user data,   WITH OFFSETOF(), offset between user data and fib node  (usually the pointer rte) */
   atomic_uint entries;				/* Number of entries */
   atomic_uint entries_min, entries_max;	/* Entry count limits (else start rehashing) */
   fib_init_fn init;			/* Constructor */
+  atomic_bool resizing;			/* resizing in progress */
 };
 
 static inline void * fib_node_to_user(struct fib *f, struct fib_node *e)
@@ -74,12 +76,17 @@ static inline void * fib_node_to_user(struct fib *f, struct fib_node *e)
 static inline struct fib_node * fib_user_to_node(struct fib *f, void *e)
 { return e ? (void *) ((char *) e + f->node_offset) : NULL; }
 
+void* fib_insert(struct fib *f, const net_addr *a);
+void printfib(struct fib *f);
+
+
+
 void fib_init(struct fib *f, pool *p, uint addr_type, uint node_size, uint node_offset, uint hash_order, fib_init_fn init);
 void *fib_find(struct fib *, const net_addr *);	/* Find or return NULL if doesn't exist */
 void *fib_get_chain(struct fib *f, const net_addr *a); /* Find first node in linked list from hash table */
 void *fib_get(struct fib *, const net_addr *);	/* Find or create new if nonexistent */
 void *fib_route(struct fib *, const net_addr *); /* Longest-match routing lookup */
-void fib_delete(struct fib *, void *);	/* Remove fib entry */
+int fib_delete(struct fib *, void *);	/* Remove fib entry */
 void fib_free(struct fib *);		/* Destroy the fib */
 void fib_check(struct fib *);		/* Consistency check for debugging */
 

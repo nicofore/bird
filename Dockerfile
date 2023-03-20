@@ -6,8 +6,10 @@ WORKDIR /root
 RUN apt-get update && apt-get install -qy git autoconf libtool gawk make \
 flex bison libncurses-dev libreadline6-dev iproute2
 
+RUN apt-get install -qy gdb
+
 ADD src src
 
 RUN cd src && autoreconf -i && ./configure && make && make install
 
-RUN tail -f /dev/null
+CMD tail -f /dev/null
