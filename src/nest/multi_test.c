@@ -6,6 +6,7 @@
 
 #include <stdio.h>
 #include <unistd.h>
+#include <stdlib.h>
 
 #include <pthread.h>
 
@@ -23,7 +24,7 @@ t_fib_simple(void)
 
 	resource_init(); // Initialize the root pool
 
-	struct fib *f = mb_alloc(&root_pool, sizeof(struct fib));
+	struct fib *f = malloc(sizeof(struct fib));
 
 	// Initialize the fib
 	fib_init(f, &root_pool, NET_IP4, sizeof(net), OFFSETOF(net, n), 0, NULL);
@@ -63,7 +64,7 @@ static int t_fib_10000_address(void)
 
 	resource_init(); // Initialize the root pool
 
-	struct fib *f = mb_alloc(&root_pool, sizeof(struct fib));
+	struct fib *f = malloc(sizeof(struct fib));
 
 	// Initialize the fib
 	fib_init(f, &root_pool, NET_IP4, sizeof(net), OFFSETOF(net, n), 0, NULL);
@@ -132,7 +133,7 @@ static int t_multi_thread(void)
 {
 	resource_init(); // Initialize the root pool
 
-	struct fib *f = mb_alloc(&root_pool, sizeof(struct fib));
+	struct fib *f = malloc(sizeof(struct fib));
 
 	// Initialize the fib
 	fib_init(f, &root_pool, NET_IP4, sizeof(net), OFFSETOF(net, n), 0, NULL);
@@ -215,16 +216,9 @@ void* f_multi(void* arg){
 	return NULL;
 }
 
-
-
-int main(int argc, char *argv[])
-{
-
-	// bt_test_suite(t_fib_simple, "Testing Simple operation fib");
-	// bt_test_suite(t_fib_10000_address, "Testing Adding/get/remove operation fib");
-	// bt_test_suite(t_multi_thread, "Testing Adding/remove operation in multithreaded fib");
+static int t_multi_add_remove(void){
 	resource_init(); // Initialize the root pool
-	struct fib *f = mb_alloc(&root_pool, sizeof(struct fib));
+	struct fib *f = malloc(sizeof(struct fib));
 
 	
 
@@ -254,7 +248,29 @@ int main(int argc, char *argv[])
 	}
 
 	
+
+	bt_assert_msg(atomic_load(&(f->entries)) == 0, "Fib count is not 0 after removing every entries\n");
+
+	fib_free(f);
+	return 1;
+
+}
+
+
+
+int main(int argc, char *argv[])
+{
+	//bt_init(argc, argv);
+	// bt_test_suite(t_fib_simple, "Testing Simple operation fib");
+	// bt_test_suite(t_fib_10000_address, "Testing Adding/get/remove operation fib");
+	// bt_test_suite(t_multi_thread, "Testing Adding/remove operation in multithreaded fib");
+
+	//bt_test_suite(t_multi_add_remove, "Testing Adding/remove operation in multithreaded fib");
 	
 
+	//return bt_exit_value();
+
+
+	t_multi_add_remove();
 	return 0;
 }
