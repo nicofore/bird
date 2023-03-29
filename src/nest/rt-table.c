@@ -92,7 +92,7 @@ net_route_ip6(rtable *t, net_addr_ip6 *n)
 	return r;
 }
 
-static char getSentinel(struct fib_node *fn){
+static char getSentinelFromNode(struct fib_node *fn){
 	return atomic_load(&(fn->sentinel)) & 1;
 }
 
@@ -120,7 +120,7 @@ net_route_ip6_sadr(rtable *t, net_addr_ip6_sadr *n)
 		struct fib_node* p = fib_get_chain(&(t->fib), (net_addr *)n, row);
 		atomic_store(curr, (atomic_uintptr_t) p);
 
-		for (fn = (struct fib_node*) atomic_load(curr); fn && !getSentinel(fn); fn = getNextNode(fn))
+		for (fn = (struct fib_node*) atomic_load(curr); fn && !getSentinelFromNode(fn); fn = getNextNode(fn))
 		{
 			net_addr_ip6_sadr *a = (void *)fn->addr;
 
@@ -192,7 +192,7 @@ net_roa_check_ip4(rtable *tab, const net_addr_ip4 *px, u32 asn)
 		atomic_uintptr_t* curr = &(tab->fib.soft_links[row][0]);
 		struct fib_node* p = fib_get_chain(&(tab->fib), (net_addr *)&n, row);
 		atomic_store(curr, (atomic_uintptr_t) p);
-		for (fn = (struct fib_node*) atomic_load(curr); fn && !getSentinel(fn); fn = getNextNode(fn))
+		for (fn = (struct fib_node*) atomic_load(curr); fn && !getSentinelFromNode(fn); fn = getNextNode(fn))
 		{
 			net_addr_roa4 *roa = (void *)fn->addr;
 			net *r = fib_node_to_user(&tab->fib, fn);
@@ -232,7 +232,7 @@ net_roa_check_ip6(rtable *tab, const net_addr_ip6 *px, u32 asn)
 		atomic_uintptr_t *curr = &(tab->fib.soft_links[row][0]);
 		struct fib_node* p = fib_get_chain(&(tab->fib), (net_addr *)&n, row);
 		atomic_store(curr, (atomic_uintptr_t) p);
-		for (fn = (struct fib_node*) atomic_load(curr); fn && !getSentinel(fn); fn = getNextNode(fn))
+		for (fn = (struct fib_node*) atomic_load(curr); fn && !getSentinelFromNode(fn); fn = getNextNode(fn))
 		{
 			net_addr_roa6 *roa = (void *)fn->addr;
 			net *r = fib_node_to_user(&tab->fib, fn);

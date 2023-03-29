@@ -253,7 +253,76 @@ static int t_multi_add_remove(void){
 
 	fib_free(f);
 	return 1;
+}
 
+
+static int t_single_ite(void){
+
+	resource_init(); // Initialize the root pool
+	struct fib *f = malloc(sizeof(struct fib));
+
+	
+
+	// Initialize the fib
+	fib_init(f, &root_pool, NET_IP4, sizeof(net), OFFSETOF(net, n), 0, NULL);
+
+	for (int i = 0; i < 10000; i++){
+		net_addr_ip4 a = NET_ADDR_IP4(i, 32);
+		net_addr* entry = (net_addr*) &a;
+		void * e;
+		
+		e = fib_insert(f, entry);
+	}
+
+	int counter = 0;
+
+	net *z;
+
+	FIB_WALK(f, net, z){
+		counter++;
+	}
+	FIB_WALK_END
+	bt_assert_msg(counter == 10000, "Did not iterate 10000\n");
+
+
+	fib_free(f);
+	return 1;
+}
+
+static int t_multi_ite(void){
+
+	resource_init(); // Initialize the root pool
+	struct fib *f = malloc(sizeof(struct fib));
+
+	
+
+	// Initialize the fib
+	fib_init(f, &root_pool, NET_IP4, sizeof(net), OFFSETOF(net, n), 0, NULL);
+
+	for (int i = 0; i < 100; i++){
+		net_addr_ip4 a = NET_ADDR_IP4(i, 32);
+		net_addr* entry = (net_addr*) &a;
+		void * e;
+		
+		e = fib_insert(f, entry);
+	}
+
+	int counter = 0;
+	net* z;
+	net* z2;
+
+	FIB_WALK(f, net, z){
+		FIB_WALK(f, net, z2){
+			counter++;
+		}
+		FIB_WALK_END
+	}
+	FIB_WALK_END
+	bt_assert_msg(counter == 10000, "Did not iterate 10000\n");
+
+
+	fib_free(f);
+	return 1;
 }
 
 
@@ -266,6 +335,8 @@ int main(int argc, char *argv[])
 	// bt_test_suite(t_multi_thread, "Testing Adding/remove operation in multithreaded fib");
 
 	//bt_test_suite(t_multi_add_remove, "Testing Adding/remove operation in multithreaded fib");
+	bt_test_suite(t_single_ite, "Testing single iterator");
+	bt_test_suite(t_multi_ite, "Testing multi iterator");
 	
 
 	//return bt_exit_value();

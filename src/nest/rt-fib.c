@@ -154,6 +154,12 @@ static int setFlagTrue(atomic_uintptr_t *ptr)
 	return (atomic_load(&old) & 1) == 0;
 }
 
+int getFlag(atomic_uintptr_t *ptr)
+{
+	struct fib_node *node = (struct fib_node *)atomic_load(ptr);
+	return (int)(atomic_load(&(node->next)) & 1);
+}
+
 u32 reverseBits(u32 num)
 {
 	u32 NO_OF_BITS = sizeof(num) * 8;
@@ -193,7 +199,7 @@ static uintptr_t getAddress(atomic_uintptr_t *ptr)
 	return atomic_load(ptr) & ~1;
 }
 
-static uintptr_t getNextAddress(atomic_uintptr_t *ptr)
+uintptr_t getNextAddress(atomic_uintptr_t *ptr)
 {
 	struct fib_node *node = (struct fib_node *)atomic_load(ptr);
 	return getAddress(&(node->next));
@@ -407,17 +413,17 @@ fib_rehash(struct fib *f)
 			exit(1);
 		}
 		atomic_uintptr_t *temp;
-		for (int i = atomic_load(&(f->hash_size)); i < 2 * atomic_load(&(f->hash_size)); i++)
+		for (uint i = atomic_load(&(f->hash_size)); i < 2 * atomic_load(&(f->hash_size)); i++)
 		{
 			atomic_store(&(newBuckets[i]), 0);
 		}
-		for (int i = 0; i < atomic_load(&(f->hash_size)); i++)
+		for (uint i = 0; i < atomic_load(&(f->hash_size)); i++)
 		{
 			atomic_store(&(newBuckets[i]), atomic_load(&(f->hash_table[i])));
 		}
 		temp = f->hash_table;
 		f->hash_table = newBuckets;
-		for (int i = 0; i < atomic_load(&(f->hash_size)); i++)
+		for (uint i = 0; i < atomic_load(&(f->hash_size)); i++)
 		{
 			if (atomic_load(&(temp[i])) != 0)
 				atomic_store(&(newBuckets[i]), atomic_load(&(temp[i])));
@@ -649,14 +655,14 @@ struct fib_node *
 fib_get_chain(struct fib *f, const net_addr *a, uint row)
 {
 	ASSERT(f->addr_type == a->type);
-	struct fib_node *e = NULL;
+	struct fib_node* e = NULL;
 	while (!e)
 	{
 		e = (struct fib_node *)atomic_load(&(f->hash_table[fib_hash(f, a)]));
 		if (!e)
 			fib_insert2(f, NULL, row, fib_hash(f, a));
 	}
-	e = getNextAddress((atomic_uintptr_t *)&e);
+	e = (struct fib_node*) getNextAddress((atomic_uintptr_t *)&e);
 
 	return e;
 }
@@ -959,18 +965,21 @@ void fib_free(struct fib *f)
 
 void fit_init(struct fib_iterator *i, struct fib *f)
 {
-	
+	i->row = reserve_row(f);
+	i->curr = &(f->soft_links[i->row][0]);
+	atomic_store(i->curr, atomic_load(&(f->hash_table[0])));
 }
 
 struct fib_node *
 fit_get(struct fib *f, struct fib_iterator *i)
 {
+	// Do nothing with new iterator
 	return NULL;
 }
 
 void fit_put(struct fib_iterator *i, struct fib_node *n)
 {
-
+	// Do nothing with new iterator
 }
 
 void fit_put_next(struct fib *f, struct fib_iterator *i, struct fib_node *n, uint hpos)

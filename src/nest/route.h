@@ -43,9 +43,8 @@ struct fib_node {
 };
 
 struct fib_iterator {			/* See lib/slists.h for an explanation */
-  struct fib_node *node;		/* Or NULL if freshly merged */
-  byte soft_link_row; 
-  uint hash;
+  atomic_uintptr_t *curr;		/* Current hash table entry */
+  uint row;
 };
 
 typedef void (*fib_init_fn)(void *);
@@ -81,6 +80,10 @@ void printfib(struct fib *f);
 
 uint reserve_row(struct fib *f);
 void release_row(struct fib *f, uint row);
+char getSentinel(atomic_uintptr_t *ptr);
+int getFlag(atomic_uintptr_t *ptr);
+uintptr_t getNextAddress(atomic_uintptr_t *ptr);
+
 
 void fib_init(struct fib *f, pool *p, uint addr_type, uint node_size, uint node_offset, uint hash_order, fib_init_fn init);
 void *fib_find(struct fib *, const net_addr *);	/* Find or return NULL if doesn't exist */
@@ -99,43 +102,44 @@ void fit_put_end(struct fib_iterator *i);
 void fit_copy(struct fib *f, struct fib_iterator *dst, struct fib_iterator *src);
 
 
-#define FIB_WALK(fib, type, z) do {				\
-	struct fib_node *fn_, **ff_ = (fib)->hash_table;	\
-	uint count_ = (fib)->hash_size;				\
+#define FIB_WALK(fib, type, z)do { 			\
+  struct fib *f_ = (fib); \
+  uint row = reserve_row(f_);					\
+  atomic_uintptr_t *curr = &(f_->soft_links[row][0]); \
+	atomic_store(curr, atomic_load(&(f_->hash_table[0])));	\
 	type *z;						\
-	while (count_--)					\
-	  for (fn_ = *ff_++; z = fib_node_to_user(fib, fn_); fn_=fn_->next)
+	while (!atomic_load(curr)){					\
+    if (getSentinel(curr) || getFlag(curr)) {\
+      atomic_store(curr, getNextAddress(curr));\
+      continue;\
+    }\
+    z = fib_node_to_user(f_, (struct fib_node*)atomic_load(curr));\
+    do \
+      
 
-#define FIB_WALK_END } while (0)
+#define FIB_WALK_END  \
+  while (0); \
+  atomic_store(curr, getNextAddress(curr)); }\
+  release_row(f_, row); \
+} while(0); \
 
 #define FIB_ITERATE_INIT(it, fib) fit_init(it, fib)
 
 #define FIB_ITERATE_START(fib, it, type, z) do {		\
-	struct fib_node *fn_ = fit_get(fib, it);		\
-	uint count_ = (fib)->hash_size;				\
-	uint hpos_ = (it)->hash;				\
-	type *z;						\
-	for(;;) {						\
-	  if (!fn_)						\
-	    {							\
-	       if (++hpos_ >= count_)				\
-		 break;						\
-	       fn_ = (fib)->hash_table[hpos_];			\
-	       continue;					\
-	    }							\
-	  z = fib_node_to_user(fib, fn_);
+  type* z;            \
+  z = NULL;\
 
-#define FIB_ITERATE_END fn_ = fn_->next; } } while(0)
+#define FIB_ITERATE_END } while(0); \ 
 
-#define FIB_ITERATE_PUT(it) fit_put(it, fn_)
+#define FIB_ITERATE_PUT(it) //fit_put(it, fn_)
 
-#define FIB_ITERATE_PUT_NEXT(it, fib) fit_put_next(fib, it, fn_, hpos_)
+#define FIB_ITERATE_PUT_NEXT(it, fib) //fit_put_next(fib, it, fn_, hpos_)
 
-#define FIB_ITERATE_PUT_END(it) fit_put_end(it)
+#define FIB_ITERATE_PUT_END(it) //fit_put_end(it)
 
-#define FIB_ITERATE_UNLINK(it, fib) fit_get(fib, it)
+#define FIB_ITERATE_UNLINK(it, fib) //fit_get(fib, it)
 
-#define FIB_ITERATE_COPY(dst, src, fib) fit_copy(fib, dst, src)
+#define FIB_ITERATE_COPY(dst, src, fib) //fit_copy(fib, dst, src)
 
 
 /*
