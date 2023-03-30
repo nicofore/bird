@@ -114,14 +114,14 @@ void fit_copy(struct fib *f, struct fib_iterator *dst, struct fib_iterator *src)
       continue;\
     }\
     z = fib_node_to_user(f_, (struct fib_node*)atomic_load(curr));\
-    do \
+    do 
       
 
 #define FIB_WALK_END  \
   while (0); \
   atomic_store(curr, getNextAddress(curr)); }\
   release_row(f_, row); \
-} while(0); \
+} while(0); 
 
 #define FIB_ITERATE_INIT(it, fib) fit_init(it, fib)
 
