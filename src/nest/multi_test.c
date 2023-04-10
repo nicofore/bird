@@ -7,15 +7,17 @@
 #include <stdio.h>
 #include <unistd.h>
 #include <stdlib.h>
-
 #include <pthread.h>
 
+
+#include <stdatomic.h>
 
 
 typedef struct threadArgs
 {
 	struct fib *fib;
 	int threadNumber;
+	atomic_uint *counter;
 } threadArgs;
 
 static int
@@ -108,6 +110,10 @@ void *f_multi_Add(void *argus)
 		net_addr_ip4 a = NET_ADDR_IP4(6 * i + threadNumber, 32);
 		net *entry = fib_get(args->fib, (net_addr *)&a);
 		bt_assert_msg(entry, "Failed to add node %d in t_fib_10000_address\n", i);
+		if (!entry)
+		{
+			printf("Failed to add node %d in t_fib_10000_address\n", 6 * i + threadNumber);
+		}
 	}
 	return NULL;
 }
@@ -123,8 +129,16 @@ void *f_multi_remove(void *argus)
 	{
 		net_addr_ip4 a = NET_ADDR_IP4(6 * i + threadNumber, 32);
 		net *entry = fib_find(args->fib, (net_addr *)&a);
-		bt_assert_msg(entry, "Failed to add node %d in t_fib_10000_address\n", i);
-		fib_delete(args->fib, entry);
+		bt_assert_msg(entry, "Failed to find %d\n", 6 * i + threadNumber, 32);
+		if (!entry)
+		{
+			printf("Failed to find %d\n", 6 * i + threadNumber);
+		}
+		if (!fib_delete(args->fib, entry)){
+			printf("Failed to remove %d\n", i);
+			
+		}
+		
 	}
 	return NULL;
 }
@@ -158,6 +172,8 @@ static int t_multi_thread(void)
 		pthread_join(threads[i], NULL);
 	}
 
+	consistency_check(f);
+
 	// Check if every entry is in the fib
 
 	for (int i = 0; i < 60000; i++)
@@ -165,10 +181,16 @@ static int t_multi_thread(void)
 		net_addr_ip4 a = NET_ADDR_IP4(i, 32);
 		net *entry = fib_find(f, (net_addr *)&a);
 		bt_assert_msg(entry, "Failed to find node %d in t_fib_10000_address\n", i);
+		if (entry == NULL)
+			printf("Could not find entry %d\n", i);
 		bt_assert_msg(net_equal_ip4((net_addr_ip4 *)&(entry->n.addr), &a), "Entry found is not the entry added\n");
+		if (!net_equal_ip4((net_addr_ip4 *)&(entry->n.addr), &a))
+			printf("Entry found is not the entry added, found pointer %p\n", entry);
 	}
 
 	bt_assert_msg(f->entries == 60000, "Fib count is not 60000\n");
+	if (f->entries != 60000)
+		printf("Fib count is not 60000, found %d\n", f->entries);
 
 	// Remove every entry
 
@@ -183,6 +205,9 @@ static int t_multi_thread(void)
 	}
 
 	bt_assert_msg(f->entries == 0, "Fib count is not 0 after removing every entries\n");
+
+	if (f->entries != 0)
+		printf("Fib count is not 0 after removing every entries, found %d\n", f->entries);
 
 	fib_free(f);
 
@@ -256,7 +281,7 @@ static int t_multi_add_remove(void){
 }
 
 
-static int t_single_ite(void){
+static int t_single_walk(void){
 
 	resource_init(); // Initialize the root pool
 	struct fib *f = malloc(sizeof(struct fib));
@@ -282,14 +307,14 @@ static int t_single_ite(void){
 		counter++;
 	}
 	FIB_WALK_END
-	bt_assert_msg(counter == 10000, "Did not iterate 10000\n");
+	bt_assert_msg(counter == 10000, "Did not iterate 10000 but %d\n", counter);
 
 
 	fib_free(f);
 	return 1;
 }
 
-static int t_multi_ite(void){
+static int t_multi_walk(void){
 
 	resource_init(); // Initialize the root pool
 	struct fib *f = malloc(sizeof(struct fib));
@@ -318,7 +343,7 @@ static int t_multi_ite(void){
 		FIB_WALK_END
 	}
 	FIB_WALK_END
-	bt_assert_msg(counter == 10000, "Did not iterate 10000\n");
+	bt_assert_msg(counter == 10000, "Did not iterate 10000 but %d\n", counter);
 
 
 	fib_free(f);
@@ -326,22 +351,299 @@ static int t_multi_ite(void){
 }
 
 
+static int t_single_ite(void){
+
+	resource_init(); // Initialize the root pool
+	struct fib *f = malloc(sizeof(struct fib));
+
+	
+
+	// Initialize the fib
+	fib_init(f, &root_pool, NET_IP4, sizeof(net), OFFSETOF(net, n), 0, NULL);
+
+	for (int i = 0; i < 10000; i++){
+		net_addr_ip4 a = NET_ADDR_IP4(i, 32);
+		net_addr* entry = (net_addr*) &a;
+		void * e;
+		
+		e = fib_insert(f, entry);
+	}
+
+	int counter = 0;
+
+	struct fib_iterator* it = malloc(sizeof(struct fib_iterator));
+
+	FIB_ITERATE_INIT(it, f);
+	
+	FIB_ITERATE_START(f, it, net, z){
+		counter++;
+	}FIB_ITERATE_END
+
+	bt_assert_msg(counter == 10000, "Did not iterate 10000 but %d\n", counter);
+
+	free(it);
+
+	fib_free(f);
+	return 1;
+}
+
+static int t_single_ite_put(void){
+
+	resource_init(); // Initialize the root pool
+	struct fib *f = malloc(sizeof(struct fib));
+
+	
+
+	// Initialize the fib
+	fib_init(f, &root_pool, NET_IP4, sizeof(net), OFFSETOF(net, n), 0, NULL);
+
+	for (int i = 0; i < 10000; i++){
+		net_addr_ip4 a = NET_ADDR_IP4(i, 32);
+		net_addr* entry = (net_addr*) &a;
+		void * e;
+		
+		e = fib_insert(f, entry);
+	}
+
+	int counter = 0;
+
+	struct fib_iterator* it = malloc(sizeof(struct fib_iterator));
+
+	FIB_ITERATE_INIT(it, f);
+	
+	FIB_ITERATE_START(f, it, net, z){
+		counter++;
+		FIB_ITERATE_PUT(it);
+		counter++;
+		counter--;
+		FIB_ITERATE_UNLINK(it, f);
+	}FIB_ITERATE_END;
+
+	bt_assert_msg(counter == 10000, "Did not iterate 10000 but %d\n", counter);
+
+	free(it);
+
+	fib_free(f);
+	return 1;
+}
+
+
+void* f_multi_ite(void* arg){
+	threadArgs* args = (threadArgs*) arg;
+	int threadNumber = args->threadNumber;
+	struct fib *f = args->fib;
+	atomic_uint* c = args->counter;
+	int counter = 0;
+
+	struct fib_iterator* it = malloc(sizeof(struct fib_iterator));
+
+	FIB_ITERATE_INIT(it, f);
+
+	FIB_ITERATE_START(f, it, net, z){
+		if (counter == threadNumber){
+			atomic_fetch_add(c, 1);
+			while (atomic_load(c) != 0){}
+			FIB_ITERATE_PUT_END(it);
+		}
+		counter++;
+	}
+	FIB_ITERATE_END;
+	free(it);
+	return NULL;
+}
+
+
+
+
+
+static int t_multiple_ite(void){
+
+	resource_init(); // Initialize the root pool
+	struct fib *f = malloc(sizeof(struct fib));
+
+	
+
+	// Initialize the fib
+	fib_init(f, &root_pool, NET_IP4, sizeof(net), OFFSETOF(net, n), 0, NULL);
+
+	atomic_uint c;
+	atomic_store(&c, 0);
+
+	for (int i = 0; i < 10; i++){
+
+		for (int i = 0; i < 31; i++){
+			net_addr_ip4 a = NET_ADDR_IP4(i, 32);
+			net_addr* entry = (net_addr*) &a;
+			void * e;
+			
+			e = fib_insert(f, entry);
+		}
+
+		threadArgs args[31];
+		pthread_t threads[31];
+
+		for (int i = 0; i < 31; i++){
+			args[i].fib = f;
+			args[i].threadNumber = i;
+			args[i].counter = &c;
+			pthread_create(&threads[i], NULL, f_multi_ite, &args[i]);
+		}
+
+		while(atomic_load(&c) != 31){}
+
+		for (int i = 0; i < 31; i++){
+			net_addr_ip4 a = NET_ADDR_IP4(i, 32);
+			net* entry = fib_find(args->fib, (net_addr *)&a);
+			bt_assert_msg(fib_delete(args->fib, entry), "Could not delete entry");
+		}
+
+		atomic_store(&c, 0);
+
+		for (int i = 0; i < 31; i++){
+			pthread_join(threads[i], NULL);
+		}
+
+	}
+
+	fib_free(f);
+	return 1;
+}
+
+
+static int t_single_get_10000_address(void)
+{
+
+	resource_init(); // Initialize the root pool
+
+	struct fib *f = malloc(sizeof(struct fib));
+
+	// Initialize the fib
+	fib_init(f, &root_pool, NET_IP4, sizeof(net), OFFSETOF(net, n), 0, NULL);
+
+	// Add a route
+
+	for (int i = 0; i < 10000; i++)
+	{
+		net_addr_ip4 a = NET_ADDR_IP4(i, 32);
+		net *entry = fib_get(f, (net_addr *)&a);
+		bt_assert_msg(entry, "Failed to add node %d in t_fib_10000_address\n", i);
+	}
+
+	bt_assert_msg(f->entries == 10000, "Fib count is not 10000\n");
+
+	for (int i = 0; i < 10000; i++)
+	{
+		net_addr_ip4 a = NET_ADDR_IP4(i, 32);
+		net *entry = fib_get(f, (net_addr *)&a);
+		bt_assert_msg(entry, "Failed to add node %d in t_fib_10000_address\n", i);
+	}
+
+	bt_assert_msg(f->entries == 10000, "Fib count is not 10000\n");
+
+	for (int i = 0; i < 10000; i++)
+	{
+		net_addr_ip4 a = NET_ADDR_IP4(i, 32);
+		net *entry = fib_find(f, (net_addr *)&a);
+		bt_assert_msg(entry, "Failed to find node %d in t_fib_10000_address\n", i);
+		bt_assert_msg(net_equal_ip4((net_addr_ip4 *)&(entry->n.addr), &a), "Entry found is not the entry added\n");
+		fib_delete(f, entry);
+	}
+
+	bt_assert_msg(f->entries == 0, "Fib count is not 0 after removing every entries\n");
+
+	fib_free(f);
+
+	return 1;
+}
+
+
+void* f_multi_get(void* arg){
+	threadArgs* args = (threadArgs*) arg;
+	int threadNumber = args->threadNumber;
+	struct fib *f = args->fib;
+
+	uint row = reserve_row(f);
+	for (int i = 0; i < 10000; i++){
+		net_addr_ip4 a = NET_ADDR_IP4(i, 32);
+		net_addr* entry = (net_addr*) &a;
+		void * e;
+		
+		while (1){
+			e = fib_get2(f, entry, row, 0);
+			if ((((uintptr_t) e) & 1) == 0){
+				break;
+			}
+		}
+		while (1){
+			if (fib_delete(f, e)){
+				break;
+			}
+		}
+	}
+	release_row(f, row);
+	return NULL;
+}
+
+
+static int t_multi_get_10000_address(void){
+	resource_init(); // Initialize the root pool
+	struct fib *f = malloc(sizeof(struct fib));
+
+	
+
+	// Initialize the fib
+	fib_init(f, &root_pool, NET_IP4, sizeof(net), OFFSETOF(net, n), 0, NULL);
+
+	pthread_t threads[6];
+	threadArgs args[6];
+
+	for (int i = 0; i < 6; i++)
+	{
+		args[i].fib = f;
+		args[i].threadNumber = i;
+	}
+
+	// Create threads
+
+	for (int i = 0; i < 6; i++)
+	{
+		pthread_create(&threads[i], NULL, f_multi_get, (void *)&args[i]);
+	}
+
+
+	for (int i = 0; i < 6; i++)
+	{
+		pthread_join(threads[i], NULL);
+	}
+
+	
+
+	bt_assert_msg(atomic_load(&(f->entries)) == 0, "Fib count is not 0 after removing every entries\n");
+
+	fib_free(f);
+	return 1;
+
+
+}
+
+
 
 int main(int argc, char *argv[])
 {
-	//bt_init(argc, argv);
-	// bt_test_suite(t_fib_simple, "Testing Simple operation fib");
-	// bt_test_suite(t_fib_10000_address, "Testing Adding/get/remove operation fib");
-	// bt_test_suite(t_multi_thread, "Testing Adding/remove operation in multithreaded fib");
+	bt_init(argc, argv);
+	//bt_test_suite(t_fib_simple, "Testing Simple operation fib");
+	//bt_test_suite(t_fib_10000_address, "Testing Adding/find/remove operation fib");
+	bt_test_suite(t_multi_thread, "Testing Adding/remove operation in multithreaded fib");
 
 	//bt_test_suite(t_multi_add_remove, "Testing Adding/remove operation in multithreaded fib");
-	bt_test_suite(t_single_ite, "Testing single iterator");
-	bt_test_suite(t_multi_ite, "Testing multi iterator");
-	
+	//bt_test_suite(t_single_walk, "Testing single walk");
+	//bt_test_suite(t_multi_walk, "Testing multi walk");
+	//bt_test_suite(t_single_ite, "Testing single iterator");
+	//bt_test_suite(t_single_ite_put, "Testing single iterator with put and unlink");
 
-	//return bt_exit_value();
+	//bt_test_suite(t_multiple_ite, "Testing multiple iterator");
+	//bt_test_suite(t_single_get_10000_address, "Testing get");
 
+	return bt_exit_value();
 
-	t_multi_add_remove();
-	return 0;
 }

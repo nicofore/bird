@@ -83,6 +83,8 @@ void release_row(struct fib *f, uint row);
 char getSentinel(atomic_uintptr_t *ptr);
 int getFlag(atomic_uintptr_t *ptr);
 uintptr_t getNextAddress(atomic_uintptr_t *ptr);
+void *fib_get2(struct fib *f, const net_addr *a, int row, u32 bucket); //For testing
+void consistency_check(struct fib *f);
 
 
 void fib_init(struct fib *f, pool *p, uint addr_type, uint node_size, uint node_offset, uint hash_order, fib_init_fn init);
@@ -102,13 +104,13 @@ void fit_put_end(struct fib_iterator *i);
 void fit_copy(struct fib *f, struct fib_iterator *dst, struct fib_iterator *src);
 
 
-#define FIB_WALK(fib, type, z)do { 			\
-  struct fib *f_ = (fib); \
+#define FIB_WALK(fibv, type, z) do { 			\
+  struct fib *f_ = (fibv); \ 
   uint row = reserve_row(f_);					\
   atomic_uintptr_t *curr = &(f_->soft_links[row][0]); \
 	atomic_store(curr, atomic_load(&(f_->hash_table[0])));	\
 	type *z;						\
-	while (!atomic_load(curr)){					\
+	while (atomic_load(curr)){					\
     if (getSentinel(curr) || getFlag(curr)) {\
       atomic_store(curr, getNextAddress(curr));\
       continue;\
@@ -125,21 +127,35 @@ void fit_copy(struct fib *f, struct fib_iterator *dst, struct fib_iterator *src)
 
 #define FIB_ITERATE_INIT(it, fib) fit_init(it, fib)
 
-#define FIB_ITERATE_START(fib, it, type, z) do {		\
-  type* z;            \
-  z = NULL;\
+#define FIB_ITERATE_START(fibv, it, type, z) do {		\
+  struct fib *f_ = (fibv); \ 
+  struct fib_iterator *it_ = (it); \
+	atomic_store(it_->curr, atomic_load(&(f_->hash_table[0])));	\
+	type *z;						\
+	while (atomic_load(it_->curr)){					\
+    if (getSentinel(it_->curr) || getFlag(it_->curr)) {\
+      atomic_store(it_->curr, getNextAddress(it_->curr));\
+      continue;\
+    }\
+    z = fib_node_to_user(f_, (struct fib_node*)atomic_load(it_->curr));\
+    do
 
-#define FIB_ITERATE_END } while(0); \ 
+#define FIB_ITERATE_END \
+  while (0); \
+  if (atomic_load(it_->curr)) {\
+  atomic_store(it_->curr, getNextAddress(it_->curr));} }\
+  release_row(f_, it_->row); \
+} while(0); 
 
-#define FIB_ITERATE_PUT(it) //fit_put(it, fn_)
+#define FIB_ITERATE_PUT(it) fit_put(it, NULL)
 
-#define FIB_ITERATE_PUT_NEXT(it, fib) //fit_put_next(fib, it, fn_, hpos_)
+#define FIB_ITERATE_PUT_NEXT(it, fib) fit_put_next(fib, it, NULL, 0)
 
-#define FIB_ITERATE_PUT_END(it) //fit_put_end(it)
+#define FIB_ITERATE_PUT_END(it) fit_put_end(it);
 
-#define FIB_ITERATE_UNLINK(it, fib) //fit_get(fib, it)
+#define FIB_ITERATE_UNLINK(it, fib) fit_get(fib, it)
 
-#define FIB_ITERATE_COPY(dst, src, fib) //fit_copy(fib, dst, src)
+#define FIB_ITERATE_COPY(dst, src, fib) fit_copy(fib, dst, src)
 
 
 /*
