@@ -75,7 +75,7 @@ static inline void * fib_node_to_user(struct fib *f, struct fib_node *e)
 static inline struct fib_node * fib_user_to_node(struct fib *f, void *e)
 { return e ? (void *) ((char *) e + f->node_offset) : NULL; }
 
-void* fib_insert(struct fib *f, const net_addr *a);
+
 void printfib(struct fib *f);
 
 uint reserve_row(struct fib *f);
@@ -83,7 +83,7 @@ void release_row(struct fib *f, uint row);
 char getSentinel(atomic_uintptr_t *ptr);
 int getFlag(atomic_uintptr_t *ptr);
 uintptr_t getNextAddress(atomic_uintptr_t *ptr);
-void *fib_get2(struct fib *f, const net_addr *a, int row, u32 bucket); //For testing
+void *fib_get2(struct fib *f, const net_addr *a, int row); //For testing
 void consistency_check(struct fib *f);
 
 

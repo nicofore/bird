@@ -126,7 +126,6 @@ int getParent(u32 bucket, u32 bucketSize)
 		parent = parent >> 1;
 	} while (parent > bucket);
 	parent = bucket - parent;
-	// printf("Parent of %u is %u\n", bucket, parent);
 	return parent;
 }
 
@@ -136,8 +135,10 @@ uint reserve_row(struct fib *f)
 	{
 		for (int i = 0; i < MAX_THREADS; i++)
 		{
-			if (!atomic_exchange(&(f->reserved_row[i]), 1))
-				return i;
+			if (atomic_load((&(f->reserved_row[i]))) == 0){
+				if (!atomic_exchange(&(f->reserved_row[i]), 1))
+					return i;
+			}
 		}
 	}
 }
@@ -280,31 +281,11 @@ static void freeNode(struct fib *f, atomic_uintptr_t *ptr, int row)
 				if (atomic_load(&(f->hand_overs[i][j])) && getNumberOfLink(&(f->hand_overs[i][j])) == 0)
 				{
 					atomic_store(ptr, atomic_exchange(&(f->hand_overs[i][j]), atomic_load(ptr)));
-					//printf("Recursive free\n");
 					freeNode(f, ptr, row);
 					return;
 				}
 			}
 		}
-		/*
-		if (getNumberOfLink(ptr) != 0)
-		{
-			// Didn't manage to free node, probably an iterator stuck on a previous node, store it somewhere in hand_overs
-			atomic_uintptr_t expected;
-			atomic_store(&expected, 0);
-			for (int i = 0; i < MAX_THREADS; i++)
-			{
-				for (int j = 0; j < 2; j++)
-				{
-					if (atomic_load(&(f->hand_overs[i][j])) == 0)
-					{
-						if (atomic_compare_exchange_weak(&(f->hand_overs[i][j]), &expected, &ptr))
-							return;
-					}
-				}
-			}
-		}
-		*/
 	}
 	
 
@@ -453,52 +434,17 @@ fib_hash(struct fib *f, const net_addr *a)
 }
 
 static void *
-fib_insert2(struct fib *f, const net_addr *a, int row, u32 bucket)
+fib_insert2(struct fib *f, int row, u32 bucket)
 {
-	if (a)
-	{
-		ASSERT(f->addr_type == a->type);
-		switch (f->addr_type)
-		{
-		case NET_IP4:
-			break;
-		case NET_IP6:
-			break;
-		case NET_VPN4:
-			break;
-		case NET_VPN6:
-			break;
-		case NET_ROA4:
-			break;
-		case NET_ROA6:
-			break;
-		case NET_FLOW4:
-			break;
-		case NET_FLOW6:
-			break;
-		case NET_IP6_SADR:
-			break;
-		case NET_MPLS:
-			break;
-		default:
-			bug("invalid type");
-		}
-	}
 
 	atomic_uintptr_t *curr = &(f->soft_links[row][0]);
 	atomic_uintptr_t *succ = &(f->soft_links[row][1]);
 
-	char sentinel;
-	if (a)
-		sentinel = 0;
-	else
-		sentinel = 1;
 
 	u32 hash;
-	if (sentinel)
-		hash = bucket;
-	else
-		hash = net_hash(a);
+	hash = bucket;
+
+
 	u32 starting_bucket;
 	u32 key = reverseBits(hash);
 	struct fib_node *new_node = NULL;
@@ -514,30 +460,23 @@ fib_insert2(struct fib *f, const net_addr *a, int row, u32 bucket)
 		}
 
 		// Checking in which bucket to insert
-		if (sentinel)
-			starting_bucket = getParent(hash, atomic_load(&(f->hash_size)));
-		else
-			starting_bucket = hash & atomic_load(&(f->hash_mask));
 
-		if (starting_bucket >= atomic_load(&(f->hash_size)))
-		{
-			// printf("Error cause starting_bucket >= hash_size\n");
-			continue;
-		}
+		starting_bucket = getParent(hash, atomic_load(&(f->hash_size)));
 
+
+		//If the starting bucket is empty, insert the sentinel node
 		if (atomic_load(&(f->hash_table[starting_bucket])) == 0)
 		{
-			fib_insert2(f, NULL, row, starting_bucket);
+			fib_insert2(f, row, starting_bucket);
 		}
 
-		// printf("Trying to add sentinel %d hash %u to bucket %u\n", (int) sentinel, hash, starting_bucket);
+		
 
 		atomic_store(curr, atomic_load(&(f->hash_table[starting_bucket])));
 
 		if (atomic_load(curr) == 0)
 		{
-			// Need to wait for resize to end
-			// printf("Exit cause curr is 0\n");
+			//Possible during a resize, the hashtable will be updated soon
 			continue;
 		}
 
@@ -555,83 +494,57 @@ fib_insert2(struct fib *f, const net_addr *a, int row, u32 bucket)
 			atomic_store(succ, getNextAddress(curr));
 		}
 
-		// If node is a sentinel, succ is the sentinel or a node with the same value
-		if (sentinel)
-		{
-			//Already exists
-			if (atomic_load(succ) != 0 && getHash(f, succ) == hash && getSentinel(succ) == sentinel)
-				return NULL;
-		}
-		else
-		{
-			// succ is a sentinel, skip once
-			if (atomic_load(succ) != 0 && getHash(f, succ) == hash && getSentinel(succ))
-			{
-				atomic_store(curr, atomic_load(succ));
-				atomic_store(succ, getNextAddress(curr));
-			}
-		}
 
-		// If the node already exists, return 0
-		if (atomic_load(succ) != 0 && getHash(f, succ) == hash && getSentinel(succ) == sentinel)
-		{
+		// If node is a sentinel, succ is the sentinel or a node with the same value
+	
+		//Already exists
+		if (atomic_load(succ) != 0 && getHash(f, succ) == hash && getSentinel(succ)) {
 			if (new_node != NULL)
 			{
-				if (sentinel)
-				{
-					// mb_free(new_node);
-					free(new_node);
-				}
-				else
-				{
-					// mb_free(fib_node_to_user(f, new_node));
-					free(fib_node_to_user(f, new_node));
-				}
+				free(new_node);
+				new_node = NULL;
 			}
+			atomic_store(curr, 0);
+			atomic_store(succ, 0);
 			return NULL;
 		}
 
-		if (new_node == NULL)
-		{
-			if (sentinel)
+		
+		//Else should be in situation where succ has the same hash or a higher hash (where we want to insert)
+
+		//Need to follow these condition to insert, else restart
+		//printf("Key curr is %u, wanting to insert %u\n", reverseBits(getHash(f, curr)), key);
+		
+		if (atomic_load(curr) != 0 && reverseBits(getHash(f, curr)) < key && (atomic_load(succ) == 0 || (atomic_load(succ) != 0 && reverseBits(getHash(f, succ)) >= key))) {
+			
+			if (new_node == NULL)
 			{
-				// new_node = mb_alloc(f->fib_pool, sizeof(struct fib_node));
 				new_node = malloc(sizeof(struct fib_node));
-				// if (new_node == NULL)
-				// printf("Error allocating memory\n");
 			}
-			else
-			{
-				// new_node = mb_alloc(f->fib_pool, a->length + f->node_size);
-				new_node = malloc(a->length + f->node_size);
-				// if (new_node == NULL)
-				// printf("Error allocating memory\n");
-				new_node = fib_user_to_node(f, new_node);
-				net_copy(&(new_node->addr[0]), a);
-			}
-			atomic_store(&(new_node->sentinel), sentinel);
-		}
-		atomic_store(&(new_node->next), atomic_load(succ));
-		atomic_store(&expected, atomic_load(succ));
 
-		if (reverseBits(getHash(f, curr)) > key)
-		{
-			// I don't know why it manage to reach here
-			// printf("Problem with key getting to far\n");
-			continue;
-		}
+			atomic_store(&(new_node->sentinel), 1);
+		
+			atomic_store(&(new_node->next), atomic_load(succ));
+			atomic_store(&expected, atomic_load(succ));
 
-		if (atomic_compare_exchange_weak(&(((struct fib_node *)atomic_load(curr))->next), &expected, (atomic_uintptr_t)new_node))
-		{
-			addALink((atomic_uintptr_t *)&new_node);
-			if (sentinel)
+			//printf("Curr is %lu, succ is %lu, getNextAddress %lu, expected is %lu, next is %lu\n", atomic_load(curr), atomic_load(succ), getNextAddress(curr), atomic_load(&expected), atomic_load(&(( (struct fib_node *) atomic_load(curr) )->next)));
+
+
+
+			if (atomic_compare_exchange_strong(&(( (struct fib_node *) atomic_load(curr) )->next), &expected, (atomic_uintptr_t) new_node))
 			{
 				atomic_store(&(f->hash_table[bucket]), (atomic_uintptr_t)new_node);
+				atomic_store(curr, 0);
+				atomic_store(succ, 0);
 				return NULL;
 			}
-			atomic_fetch_add(&(f->entries), 1);
-			return fib_node_to_user(f, new_node);
+			
+			
 		}
+
+		//Failed to insert or conditions not met, restart
+		goto start;
+		
 	}
 }
 
@@ -644,20 +557,14 @@ fib_get_chain(struct fib *f, const net_addr *a, uint row)
 	{
 		e = (struct fib_node *)atomic_load(&(f->hash_table[fib_hash(f, a)]));
 		if (!e)
-			fib_insert2(f, NULL, row, fib_hash(f, a));
+			fib_insert2(f, row, fib_hash(f, a));
 	}
 	e = (struct fib_node*) getNextAddress((atomic_uintptr_t *)&e);
 
 	return e;
 }
 
-void *fib_insert(struct fib *f, const net_addr *a)
-{
-	int row = reserve_row(f);
-	void *r = fib_insert2(f, a, row, 0);
-	release_row(f, row);
-	return r;
-}
+
 
 /**
  * fib_find - search for FIB node by prefix
@@ -679,36 +586,60 @@ fib_find(struct fib *f, const net_addr *a)
 
 	atomic_uintptr_t *curr = &(f->soft_links[row][0]);
 
-	u32 bucket = hash & atomic_load(&(f->hash_mask));
-	atomic_store(curr, atomic_load(&(f->hash_table[bucket])));
-
-	if (atomic_load(curr) == 0)
-	{
-		// No sentinel node
-		fib_insert2(f, NULL, row, bucket);
+	start:
+	while (1){
+		u32 bucket = hash & atomic_load(&(f->hash_mask));
 		atomic_store(curr, atomic_load(&(f->hash_table[bucket])));
-	}
 
-	while (atomic_load(curr) != 0 && reverseBits(getHash(f, curr)) <= key)
-	{
-		if (getHash(f, curr) == hash && getSentinel(curr) == 0)
+		if (atomic_load(curr) == 0)
 		{
-			// Found the node
-			release_row(f, row);
-			return fib_node_to_user(f, (struct fib_node *)atomic_load(curr));
+			// No sentinel node
+			fib_insert2(f, row, bucket);
+			atomic_store(curr, atomic_load(&(f->hash_table[bucket])));
 		}
-		atomic_store(curr, getNextAddress(curr));
-	}
+
+		if (atomic_load(curr) == 0)
+		{
+			//Can happen during resize
+			//printf("No sentinel node\n");
+			continue;
+		}
+
+
+		while (atomic_load(curr) != 0 && reverseBits(getHash(f, curr)) <= key)
+		{
+			if (getHash(f, curr) == hash && getSentinel(curr) == 0)
+			{
+				// Check if same address
+				struct fib_node *node = (struct fib_node *)atomic_load(curr);
+				if (net_equal(a, (&((node)->addr[0])) ) )
+				{
+					if (getFlag(curr)){
+						atomic_store(curr, 0);
+						release_row(f, row);
+						goto start;
+					}
+					// Found the node
+					release_row(f, row);
+					return fib_node_to_user(f, node);
+				}
+			}
+			atomic_store(curr, getNextAddress(curr));
+		}
 
 	// Not found
+	atomic_store(curr, 0);
 	release_row(f, row);
 	return NULL;
+	}
+
+	
 }
 
 
 
 void *
-fib_get2(struct fib *f, const net_addr *a, int row, u32 bucket)
+fib_get2(struct fib *f, const net_addr *a, int row)
 {
 	if (a)
 	{
@@ -743,17 +674,13 @@ fib_get2(struct fib *f, const net_addr *a, int row, u32 bucket)
 	atomic_uintptr_t *curr = &(f->soft_links[row][0]);
 	atomic_uintptr_t *succ = &(f->soft_links[row][1]);
 
-	char sentinel = 0;
-
-	u32 hash;
-	if (sentinel)
-		hash = bucket;
-	else
-		hash = net_hash(a);
+	u32 hash = net_hash(a);
 	u32 starting_bucket;
 	u32 key = reverseBits(hash);
 	struct fib_node *new_node = NULL;
 	atomic_uintptr_t expected;
+
+	//printf("Trying to add node with hash %u\n", hash);
 
 	start:
 	while (1)
@@ -765,120 +692,109 @@ fib_get2(struct fib *f, const net_addr *a, int row, u32 bucket)
 		}
 
 		// Checking in which bucket to insert
-		if (sentinel)
-			starting_bucket = getParent(hash, atomic_load(&(f->hash_size)));
-		else
-			starting_bucket = hash & atomic_load(&(f->hash_mask));
+		starting_bucket = hash & atomic_load(&(f->hash_mask));
 
-		if (starting_bucket >= atomic_load(&(f->hash_size)))
-		{
-			// printf("Error cause starting_bucket >= hash_size\n");
-			continue;
-		}
 
+		//If bucket has no sentinel nodes, insert one
 		if (atomic_load(&(f->hash_table[starting_bucket])) == 0)
 		{
-			fib_insert2(f, NULL, row, starting_bucket);
+			fib_insert2(f, row, starting_bucket);
 		}
 
-		// printf("Trying to add sentinel %d hash %u to bucket %u\n", (int) sentinel, hash, starting_bucket);
+		
 
 		atomic_store(curr, atomic_load(&(f->hash_table[starting_bucket])));
 
 		if (atomic_load(curr) == 0)
 		{
 			// Need to wait for resize to end
-			// printf("Exit cause curr is 0\n");
+			//printf("Waiting for resize\n");
 			continue;
 		}
 
 		atomic_store(succ, getNextAddress(curr));
 
-		// Find the right place to insert the node
+		//Find the right place to insert the node
 		while (atomic_load(succ) != 0 && reverseBits(getHash(f, succ)) < key)
 		{
 			atomic_store(curr, getNextAddress(curr));
 			if (atomic_load(curr) == 0)
 			{
 				// Can happen if delete last node, restart
+				//printf("Curr is null\n");
 				goto start;
 			}
 			atomic_store(succ, getNextAddress(curr));
 		}
 
-		// If node is a sentinel, succ is the sentinel or a node with the same value
-		if (sentinel)
-		{
-			//Already exists
-			if (atomic_load(succ) != 0 && getHash(f, succ) == hash && getSentinel(succ) == sentinel)
-				return (void *) ((uintptr_t) fib_node_to_user(f, atomic_load(succ)) | 1);
-		}
-		else
-		{
-			// succ is a sentinel, skip once
-			if (atomic_load(succ) != 0 && getHash(f, succ) == hash && getSentinel(succ))
-			{
-				atomic_store(curr, atomic_load(succ));
-				atomic_store(succ, getNextAddress(curr));
-			}
+
+		//Can skip a node with the same hash if node deleted in front of curr
+		if (reverseBits(getHash(f, curr)) == key && !getSentinel(curr)){
+			goto start;
 		}
 
-		// If the node already exists, return 0
-		if (atomic_load(succ) != 0 && getHash(f, succ) == hash && getSentinel(succ) == sentinel)
+		//Since there could be multiple nodes with same hashes, we need to keep advancing until we find the right node or reach the end of same hashes
+		while ((atomic_load(succ) != 0 && reverseBits(getHash(f, succ)) <= key))
 		{
-			if (new_node != NULL)
+			if (getHash(f, succ) == hash && !getSentinel(succ))
 			{
-				if (sentinel)
+				// Check if same address
+				struct fib_node *node = (struct fib_node *)atomic_load(succ);
+				if (net_equal(a, (& (node->addr[0]) ) ))
 				{
-					// mb_free(new_node);
-					free(new_node);
-				}
-				else
-				{
-					// mb_free(fib_node_to_user(f, new_node));
-					free(fib_node_to_user(f, new_node));
+					if (new_node != NULL)
+					{
+						free(fib_node_to_user(f, new_node));
+						new_node = NULL;
+					}
+					// Found the node
+					atomic_store(curr, 0);
+					void * r = atomic_load(succ);
+					if (getFlag(succ)){
+						atomic_store(succ, 0);
+						goto start;
+					}
+					atomic_store(succ, 0);
+					
+					return (void *) (((uintptr_t) fib_node_to_user(f, r)) | 1);
 				}
 			}
-			return (void *) (((uintptr_t) fib_node_to_user(f, atomic_load(succ))) | 1);
+
+			atomic_store(curr, getNextAddress(curr));
+			if (atomic_load(curr) == 0 || (!getSentinel(curr) && net_equal(a, (& ( ((struct fib_node*) (atomic_load(curr)))->addr[0]) ))))
+			{
+				
+				// Can happen if delete last node, restart
+				goto start;
+			}
+
+			atomic_store(succ, getNextAddress(curr));
 		}
 
-		if (new_node == NULL)
+
+		//Last check for inserting
+		if (atomic_load(curr) != 0 && reverseBits(getHash(f, curr)) <= key && (atomic_load(succ) == 0 || (atomic_load(succ) != 0 && reverseBits(getHash(f, succ)) > key)))
 		{
-			if (sentinel)
+			if (new_node == NULL)
 			{
-				// new_node = mb_alloc(f->fib_pool, sizeof(struct fib_node));
-				new_node = malloc(sizeof(struct fib_node));
-				// if (new_node == NULL)
-				// printf("Error allocating memory\n");
-			}
-			else
-			{
-				// new_node = mb_alloc(f->fib_pool, a->length + f->node_size);
 				new_node = malloc(a->length + f->node_size);
-				// if (new_node == NULL)
-				// printf("Error allocating memory\n");
 				new_node = fib_user_to_node(f, new_node);
 				net_copy(&(new_node->addr[0]), a);
 			}
-			atomic_store(&(new_node->sentinel), sentinel);
-		}
-		atomic_store(&(new_node->next), atomic_load(succ));
-		atomic_store(&expected, atomic_load(succ));
-
-		if (reverseBits(getHash(f, curr)) > key)
-		{
-			// I don't know why it manage to reach here
-			// printf("Problem with key getting to far\n");
-			continue;
-		}
-
-		if (atomic_compare_exchange_weak(&(((struct fib_node *)atomic_load(curr))->next), &expected, (atomic_uintptr_t)new_node))
-		{
-			addALink((atomic_uintptr_t *)&new_node);
-			atomic_fetch_add(&(f->entries), 1);
-
-			return fib_node_to_user(f, new_node);
-		}
+			atomic_store(&(new_node->sentinel), 0);
+			
+			atomic_store(&(new_node->next), atomic_load(succ));
+			atomic_store(&expected, atomic_load(succ));
+			
+			if (atomic_compare_exchange_strong(&(((struct fib_node *)atomic_load(curr))->next), &expected, (atomic_uintptr_t)new_node))
+			{
+				addALink((atomic_uintptr_t *)&new_node);
+				atomic_fetch_add(&(f->entries), 1);
+				atomic_store(curr, 0);
+				atomic_store(succ, 0);
+				return fib_node_to_user(f, new_node);
+			}
+		}	
 	}
 }
 
@@ -896,7 +812,7 @@ void *
 fib_get(struct fib *f, const net_addr *a)
 {
 	int row = reserve_row(f);
-	void *r = fib_get2(f, a, row, 0);
+	void *r = fib_get2(f, a, row);
 	release_row(f, row);
 	return (void*) ((uintptr_t) r & ~1);
 }
@@ -979,39 +895,39 @@ int fib_delete(struct fib *f, void *E)
 
 	if (E == NULL)
 	{
-		// printf("Error, deleting NULL\n");
 		return 0;
 	}
 
 	struct fib_node *n = fib_user_to_node(f, E);
 
-	int row = reserve_row(f);
+	uint row = reserve_row(f);
 
-	int isNodeMarked = 0;
+	int isNodeMarked = setFlagTrue(&(n->next));
+	
+	//Is already marked
+	if (!isNodeMarked)
+	{
+		release_row(f, row);
+		return 0;
+	}
+
 	atomic_uintptr_t *curr = &(f->soft_links[row][0]);
 	atomic_uintptr_t *succ = &(f->soft_links[row][1]);
 
 	atomic_store(succ, (atomic_uintptr_t)n);
 	u32 hash = getHash(f, succ);
+	u32 key = reverseBits(hash);
 
 	while (1)
 	{
 		u32 bucket = hash & atomic_load(&(f->hash_mask));
 
-		if (bucket >= atomic_load(&(f->hash_size)))
-		{
-			// printf("Error, bucket %u is out of range\n", bucket);
-			printf("1\n");
-			release_row(f, row);
-			return 0;
-		}
 
 		if (atomic_load(&(f->hash_table[bucket])) == 0)
 		{
-			fib_insert2(f, NULL, row, bucket);
+			fib_insert2(f, row, bucket);
 		}
 
-		u32 key = reverseBits(hash);
 
 		atomic_store(curr, atomic_load(&(f->hash_table[bucket])));
 
@@ -1027,33 +943,15 @@ int fib_delete(struct fib *f, void *E)
 			atomic_store(curr, getNextAddress(curr));
 		}
 
-		// Not found
-		if (atomic_load(curr) == 0)
-		{
-			if (isNodeMarked)
-				continue;
-			release_row(f, row);
-			printf("2\n");
-			return 0;
-		}
+		
 
 		// Found and can try to remove
-		else if (getNextAddress(curr) == atomic_load(succ))
+		if (atomic_load(curr) != 0 && getNextAddress(curr) == atomic_load(succ))
 		{
-			if (!isNodeMarked)
-				isNodeMarked = setFlagTrue(&(((struct fib_node *)(atomic_load(succ)))->next));
-			if (!isNodeMarked)
-			{
-				// Already marked
-				release_row(f, row);
-				printf("3\n");
-				return 0;
-			}
-			// Try to remove the node
 			atomic_uintptr_t expected;
 			atomic_store(&expected, atomic_load(succ));
 
-			int result = atomic_compare_exchange_weak(&(((struct fib_node *)atomic_load(curr))->next), &expected, getNextAddress(succ));
+			int result = atomic_compare_exchange_strong(&(((struct fib_node *)atomic_load(curr))->next), &expected, getNextAddress(succ));
 
 			if (result)
 			{
@@ -1065,7 +963,6 @@ int fib_delete(struct fib *f, void *E)
 					atomic_store(curr, getNextAddress(succ));
 					addALink(curr);
 				}
-					
 				atomic_store(&expected, atomic_load(succ));
 				atomic_store(succ, 0);
 				atomic_store(curr, 0);
@@ -1077,21 +974,13 @@ int fib_delete(struct fib *f, void *E)
 			else
 			{
 				// Node was not removed, restart
-				// printf("Failed to remove\n");
 				continue;
 			}
 
-		} // Already passed it
+		} // Not found, should not happen if node is in the FIB
 		else
 		{
-			if (isNodeMarked || atomic_load(succ) == atomic_load(curr))
-				continue;
-			if (reverseBits(getHash(f, curr)) <= key)
-				goto advance;
-			release_row(f, row);
-			printf("Wanted to remove %u, but is at %u", key, reverseBits(getHash(f, curr)));
-			printf("4\n");
-			return 0;
+			bug("fib_delete() called for invalid node");
 		}
 	}
 }
@@ -1173,7 +1062,8 @@ void fit_put(struct fib_iterator *i, struct fib_node *n)
 
 void fit_put_next(struct fib *f, struct fib_iterator *i, struct fib_node *n, uint hpos)
 {
-	atomic_store(i->curr, getNextAddress(i->curr));
+	atomic_uintptr_t add = (atomic_uintptr_t) n;
+	atomic_store(i->curr, getNextAddress(&add));
 }
 
 void fit_put_end(struct fib_iterator *i)
@@ -1200,6 +1090,7 @@ void consistency_check(struct fib *f)
 
 	u32 currKey;
 	char currSentinel;
+	u32 counter = 0;
 
 	while (atomic_load(curr) != 0)
 	{
@@ -1224,8 +1115,16 @@ void consistency_check(struct fib *f)
 					
 				}
 			}
+
+			if (!getSentinel(curr)){
+				counter++;
+			}
 				
 		}
+	}
+
+	if (atomic_load(&(f->entries)) != counter){
+		printf("Problem : %u entries in the FIB, but %u in the hash table\n", atomic_load(&(f->entries)), counter);
 	}
 
 	// Not found

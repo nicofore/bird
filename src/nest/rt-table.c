@@ -133,10 +133,13 @@ net_route_ip6_sadr(rtable *t, net_addr_ip6_sadr *n)
 			}
 		}
 
-		release_row(&(t->fib), row);
+		
 
-		if (best)
+		if (best){
+			release_row(&(t->fib), row);
 			return best;
+		}
+			
 
 		if (!n->dst_pxlen)
 			break;
@@ -144,6 +147,8 @@ net_route_ip6_sadr(rtable *t, net_addr_ip6_sadr *n)
 		n->dst_pxlen--;
 		ip6_clrbit(&n->dst_prefix, n->dst_pxlen);
 	}
+
+	release_row(&(t->fib), row);
 
 	return NULL;
 }
