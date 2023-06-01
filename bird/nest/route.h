@@ -130,7 +130,6 @@ void fit_copy(struct fib *f, struct fib_iterator *dst, struct fib_iterator *src)
 #define FIB_ITERATE_START(fibv, it, type, z) do {		\
   struct fib *f_ = (fibv); \ 
   struct fib_iterator *it_ = (it); \
-	atomic_store(it_->curr, atomic_load(&(f_->hash_table[0])));	\
 	type *z;						\
 	while (atomic_load(it_->curr)){					\
     if (getSentinel(it_->curr) || getFlag(it_->curr)) {\

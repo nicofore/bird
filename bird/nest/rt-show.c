@@ -252,7 +252,8 @@ rt_show_cont(struct cli *c)
     if (d->tables_defined_by & RSD_TDB_SET)
       rt_show_table(c, d);
   }
-
+  
+  
   FIB_ITERATE_START(fib, it, net, n)
   {
     if (!max--)
@@ -263,9 +264,11 @@ rt_show_cont(struct cli *c)
     rt_show_net(c, n, d);
   }
   FIB_ITERATE_END;
+  
 
   if (d->stats)
   {
+
     if (d->last_table != d->tab)
       rt_show_table(c, d);
 
@@ -273,6 +276,7 @@ rt_show_cont(struct cli *c)
 	       d->show_counter - d->show_counter_last, d->rt_counter - d->rt_counter_last,
 	       d->net_counter - d->net_counter_last, d->tab->table->name);
   }
+  cli_printf(c, -1007, "End d stats");
 
   d->kernel = NULL;
   d->table_open = 0;

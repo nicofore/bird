@@ -529,8 +529,6 @@ fib_insert2(struct fib *f, int row, u32 bucket)
 
 			//printf("Curr is %lu, succ is %lu, getNextAddress %lu, expected is %lu, next is %lu\n", atomic_load(curr), atomic_load(succ), getNextAddress(curr), atomic_load(&expected), atomic_load(&(( (struct fib_node *) atomic_load(curr) )->next)));
 
-
-
 			if (atomic_compare_exchange_strong(&(( (struct fib_node *) atomic_load(curr) )->next), &expected, (atomic_uintptr_t) new_node))
 			{
 				atomic_store(&(f->hash_table[bucket]), (atomic_uintptr_t)new_node);
@@ -777,7 +775,7 @@ fib_get2(struct fib *f, const net_addr *a, int row)
 		{
 			if (new_node == NULL)
 			{
-				new_node = malloc(a->length + f->node_size);
+				new_node = calloc(a->length + f->node_size, 1);
 				new_node = fib_user_to_node(f, new_node);
 				net_copy(&(new_node->addr[0]), a);
 			}
@@ -785,9 +783,12 @@ fib_get2(struct fib *f, const net_addr *a, int row)
 			
 			atomic_store(&(new_node->next), atomic_load(succ));
 			atomic_store(&expected, atomic_load(succ));
+
 			
 			if (atomic_compare_exchange_strong(&(((struct fib_node *)atomic_load(curr))->next), &expected, (atomic_uintptr_t)new_node))
 			{
+				if (f->init)
+					f->init(new_node);
 				addALink((atomic_uintptr_t *)&new_node);
 				atomic_fetch_add(&(f->entries), 1);
 				atomic_store(curr, 0);
