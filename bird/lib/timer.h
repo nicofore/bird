@@ -14,6 +14,8 @@
 #include "lib/buffer.h"
 #include "lib/resource.h"
 
+#include <pthread.h>
+
 
 typedef struct timer
 {

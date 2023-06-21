@@ -61,7 +61,6 @@ check_list(list *l, node *n)
 
   ASSERT_DIE(cur == &(l->tail_node));
   ASSERT_DIE(!n || (seen == 1));
-
   return 1;
 }
 
@@ -75,6 +74,7 @@ check_list(list *l, node *n)
 LIST_INLINE void
 add_tail(list *l, node *n)
 {
+  //pthread_mutex_lock(&l->mutex);
   EXPENSIVE_CHECK(check_list(l, NULL));
   ASSUME(n->prev == NULL);
   ASSUME(n->next == NULL);
@@ -83,8 +83,10 @@ add_tail(list *l, node *n)
 
   n->next = &l->tail_node;
   n->prev = z;
+  n->l = l;
   z->next = n;
   l->tail = n;
+  //pthread_mutex_unlock(&l->mutex);
 }
 
 /**
@@ -97,6 +99,7 @@ add_tail(list *l, node *n)
 LIST_INLINE void
 add_head(list *l, node *n)
 {
+  //pthread_mutex_lock(&l->mutex);
   EXPENSIVE_CHECK(check_list(l, NULL));
   ASSUME(n->prev == NULL);
   ASSUME(n->next == NULL);
@@ -105,8 +108,10 @@ add_head(list *l, node *n)
 
   n->next = z;
   n->prev = &l->head_node;
+  n->l = l;
   z->prev = n;
   l->head = n;
+  //pthread_mutex_unlock(&l->mutex);
 }
 
 /**
@@ -120,6 +125,7 @@ add_head(list *l, node *n)
 LIST_INLINE void
 insert_node(node *n, node *after)
 {
+  //pthread_mutex_lock(&((list*)(after->l))->mutex);
   EXPENSIVE_CHECK(check_list(l, after));
   ASSUME(n->prev == NULL);
   ASSUME(n->next == NULL);
@@ -128,8 +134,10 @@ insert_node(node *n, node *after)
 
   n->next = z;
   n->prev = after;
+  n->l = after->l;
   after->next = n;
   z->prev = n;
+  //pthread_mutex_unlock(&((list*)(after->l))->mutex);
 }
 
 /**
@@ -141,6 +149,7 @@ insert_node(node *n, node *after)
 LIST_INLINE void
 rem_node(node *n)
 {
+  //pthread_mutex_lock(&((list*)(n->l))->mutex);
   EXPENSIVE_CHECK(check_list(NULL, n));
 
   node *z = n->prev;
@@ -150,6 +159,7 @@ rem_node(node *n)
   x->prev = z;
   n->next = NULL;
   n->prev = NULL;
+  //pthread_mutex_unlock(&((list*)(n->l))->mutex);
 }
 
 /**
@@ -161,12 +171,14 @@ rem_node(node *n)
 LIST_INLINE void
 update_node(node *n)
 {
+  //pthread_mutex_lock(&((list*)(n->l))->mutex);
   ASSUME(n->next->prev == n->prev->next);
 
   n->next->prev = n;
   n->prev->next = n;
 
   EXPENSIVE_CHECK(check_list(NULL, n));
+  //pthread_mutex_unlock(&((list*)(n->l))->mutex);
 }
 
 /**
@@ -182,6 +194,7 @@ init_list(list *l)
   l->head = &l->tail_node;
   l->null = NULL;
   l->tail = &l->head_node;
+  //pthread_mutex_init(&l->mutex, NULL);
 }
 
 /**
@@ -195,6 +208,8 @@ init_list(list *l)
 LIST_INLINE void
 add_tail_list(list *to, list *l)
 {
+  //pthread_mutex_lock(&l->mutex);
+  //pthread_mutex_lock(&to->mutex);
   EXPENSIVE_CHECK(check_list(to, NULL));
   EXPENSIVE_CHECK(check_list(l, NULL));
 
@@ -208,11 +223,14 @@ add_tail_list(list *to, list *l)
   to->tail = q;
 
   EXPENSIVE_CHECK(check_list(to, NULL));
+  //pthread_mutex_lock(&to->mutex);
+  //pthread_mutex_lock(&l->mutex);
 }
 
 LIST_INLINE uint
 list_length(list *l)
 {
+  //pthread_mutex_lock(&l->mutex);
   uint len = 0;
   node *n;
 
@@ -220,6 +238,7 @@ list_length(list *l)
 
   WALK_LIST(n, *l)
     len++;
-
+  
+  //pthread_mutex_unlock(&l->mutex);
   return len;
 }

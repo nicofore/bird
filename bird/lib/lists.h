@@ -9,6 +9,8 @@
 #ifndef _BIRD_LISTS_H_
 #define _BIRD_LISTS_H_
 
+#include <pthread.h>
+
 /*
  * I admit the list structure is very tricky and also somewhat awkward,
  * but it's both efficient and easy to manipulate once one understands the
@@ -24,6 +26,7 @@
 
 typedef struct node {
   struct node *next, *prev;
+  void* l;
 } node;
 
 typedef union list {			/* In fact two overlayed nodes */
@@ -40,6 +43,7 @@ typedef union list {			/* In fact two overlayed nodes */
     struct node *null;
     struct node *tail;
   };
+  //pthread_mutex_t mutex;
 } list;
 
 

@@ -133,12 +133,17 @@ config_parse(struct config *c)
   cfg_mem = c->mem;
   if (setjmp(conf_jmpbuf))
     goto cleanup;
-
+  printf("Start\n");
   cf_lex_init(0, c);
+  printf("cf done\n");
   sysdep_preconfig(c);
+  printf("sys preconf done\n");
   protos_preconfig(c);
+  printf("protos preconf done\n");
   rt_preconfig(c);
+  printf("rt done\n");
   cf_parse();
+  printf("Ok\n");
 
   if (EMPTY_LIST(c->protos))
     cf_error("No protocol is specified in the config file");
@@ -151,6 +156,7 @@ config_parse(struct config *c)
   done = 1;
 
 cleanup:
+  printf("done = %d\n", done);
   new_config = NULL;
   cfg_mem = NULL;
   return done;

@@ -65,7 +65,7 @@ void wakeup_kick_current(void);
 #else
 
 /* Just use main timelooop */
-static inline struct timeloop * timeloop_current(void) { return &main_timeloop; }
+static inline struct timeloop * timeloop_current(void) {return &main_timeloop; }
 static inline void timeloop_init_current(void) { }
 
 #endif
@@ -73,7 +73,21 @@ static inline void timeloop_init_current(void) { }
 btime
 current_time(void)
 {
-  return timeloop_current()->last_time;
+  struct timespec ts;
+  int rv;
+
+  /*
+   * This is third time-tracking procedure (after update_times() above and
+   * times_update() in BFD), dedicated to internal event log and latency
+   * tracking. Hopefully, we consolidate these sometimes.
+   */
+
+  rv = clock_gettime(CLOCK_MONOTONIC, &ts);
+  if (rv < 0)
+    die("clock_gettime: %m");
+
+  return ts.tv_sec S + ts.tv_nsec NS;
+  //return loop->last_time;
 }
 
 btime
@@ -164,12 +178,14 @@ tm_set(timer *t, btime when)
   if ((loop != &main_timeloop) && (t->index == 1))
     wakeup_kick_current();
 #endif
+  
 }
 
 void
 tm_start(timer *t, btime after)
 {
-  tm_set(t, current_time() + MAX(after, 0));
+  btime now = current_time();
+  tm_set(t, now + MAX(after, 0));
 }
 
 void
@@ -210,8 +226,10 @@ timers_fire(struct timeloop *loop)
 
   while (t = timers_first(loop))
   {
-    if (t->expires > base_time)
+    if (t->expires > base_time){
       return;
+    }
+      
 
     if (t->recurrent)
     {
@@ -222,11 +240,12 @@ timers_fire(struct timeloop *loop)
 
       if (t->randomize)
 	when += random() % (t->randomize + 1);
-
       tm_set(t, when);
     }
-    else
+    else{
       tm_stop(t);
+    }
+      
 
     /* This is ugly hack, we want to log just timers executed from the main I/O loop */
     if (loop == &main_timeloop)

@@ -197,8 +197,11 @@ unix_read_config(struct config **cp, const char *name)
 
   *cp = conf;
   conf->file_fd = open(name, O_RDONLY);
-  if (conf->file_fd < 0)
+  if (conf->file_fd < 0){
+    printf("Failed to read conf\n");
     return 0;
+  }
+    
   cf_read_hook = cf_read;
   ret = config_parse(conf);
   close(conf->file_fd);
