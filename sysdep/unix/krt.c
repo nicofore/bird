@@ -53,7 +53,7 @@
 
 #include "nest/bird.h"
 #include "nest/iface.h"
-#include "nest/route.h"
+#include "nest/rt.h"
 #include "nest/protocol.h"
 #include "filter/filter.h"
 #include "conf/conf.h"
@@ -74,7 +74,7 @@ static list krt_proto_list;
 void
 krt_io_init(void)
 {
-  krt_pool = rp_new(&root_pool, "Kernel Syncer");
+  krt_pool = rp_new(&root_pool, the_bird_domain.the_bird, "Kernel Syncer");
   krt_filter_lp = lp_new_default(krt_pool);
   init_list(&krt_proto_list);
   krt_sys_io_init();
@@ -163,6 +163,15 @@ kif_shutdown(struct proto *P)
   return PS_DOWN;
 }
 
+static void
+kif_cleanup(struct proto *p)
+{
+  if (p->debug & D_EVENTS)
+    log(L_TRACE "%s: Flushing interfaces", p->name);
+  if_start_update();
+  if_end_update();
+}
+
 static int
 kif_reconfigure(struct proto *p, struct proto_config *new)
 {
@@ -232,16 +241,23 @@ kif_copy_config(struct proto_config *dest, struct proto_config *src)
 struct protocol proto_unix_iface = {
   .name = 		"Device",
   .template = 		"device%d",
-  .class =		PROTOCOL_DEVICE,
   .proto_size =		sizeof(struct kif_proto),
   .config_size =	sizeof(struct kif_config),
   .preconfig =		kif_preconfig,
   .init =		kif_init,
   .start =		kif_start,
   .shutdown =		kif_shutdown,
+  .cleanup =		kif_cleanup,
   .reconfigure =	kif_reconfigure,
   .copy_config =	kif_copy_config
 };
+
+void
+kif_build(void)
+{
+  proto_build(&proto_unix_iface);
+}
+
 
 /*
  *	Tracing of routes
@@ -251,14 +267,14 @@ static inline void
 krt_trace_in(struct krt_proto *p, rte *e, char *msg)
 {
   if (p->p.debug & D_PACKETS)
-    log(L_TRACE "%s: %N: %s", p->p.name, e->net->n.addr, msg);
+    log(L_TRACE "%s: %N: %s", p->p.name, e->net, msg);
 }
 
 static inline void
 krt_trace_in_rl(struct tbf *f, struct krt_proto *p, rte *e, char *msg)
 {
   if (p->p.debug & D_PACKETS)
-    log_rl(f, L_TRACE "%s: %N: %s", p->p.name, e->net->n.addr, msg);
+    log_rl(f, L_TRACE "%s: %N: %s", p->p.name, e->net, msg);
 }
 
 /*
@@ -277,260 +293,43 @@ static struct tbf rl_alien = TBF_DEFAULT_LOG_LIMITS;
  * the same key.
  */
 
-static inline int
-krt_same_key(rte *a, rte *b)
+static inline u32
+krt_metric(rte *a)
 {
-  return a->u.krt.metric == b->u.krt.metric;
-}
-
-static inline int
-krt_uptodate(rte *a, rte *b)
-{
-  if (a->attrs != b->attrs)
-    return 0;
-
-  if (a->u.krt.proto != b->u.krt.proto)
-    return 0;
-
-  return 1;
+  eattr *ea = ea_find(a->attrs, &ea_krt_metric);
+  return ea ? ea->u.data : 0;
 }
 
 static void
-krt_learn_announce_update(struct krt_proto *p, rte *e)
+krt_learn_alien_attr(struct channel *c, rte *e)
 {
-  net *n = e->net;
-  rta *aa = rta_clone(e->attrs);
-  rte *ee = rte_get_temp(aa);
-  ee->pflags = EA_ID_FLAG(EA_KRT_SOURCE) | EA_ID_FLAG(EA_KRT_METRIC);
-  ee->u.krt = e->u.krt;
-  rte_update(&p->p, n->n.addr, ee);
-}
-
-static void
-krt_learn_announce_delete(struct krt_proto *p, net *n)
-{
-  rte_update(&p->p, n->n.addr, NULL);
+  ea_set_attr_u32(&e->attrs, &ea_gen_preference, 0, c->preference);
 }
 
 /* Called when alien route is discovered during scan */
 static void
 krt_learn_scan(struct krt_proto *p, rte *e)
 {
-  net *n0 = e->net;
-  net *n = net_get(&p->krt_table, n0->n.addr);
-  rte *m, **mm;
+  rte e0 = {
+    .attrs = e->attrs,
+    .src = rt_get_source(&p->p, krt_metric(e)),
+  };
 
-  e->attrs = rta_lookup(e->attrs);
+  krt_learn_alien_attr(p->p.main_channel, &e0);
 
-  for(mm=&n->routes; m = *mm; mm=&m->next)
-    if (krt_same_key(m, e))
-      break;
-  if (m)
-    {
-      if (krt_uptodate(m, e))
-	{
-	  krt_trace_in_rl(&rl_alien, p, e, "[alien] seen");
-	  rte_free(e);
-	  m->u.krt.seen = 1;
-	}
-      else
-	{
-	  krt_trace_in(p, e, "[alien] updated");
-	  *mm = m->next;
-	  rte_free(m);
-	  m = NULL;
-	}
-    }
-  else
-    krt_trace_in(p, e, "[alien] created");
-  if (!m)
-    {
-      e->next = n->routes;
-      n->routes = e;
-      e->u.krt.seen = 1;
-    }
-}
-
-static void
-krt_learn_prune(struct krt_proto *p)
-{
-  struct fib *fib = &p->krt_table.fib;
-  struct fib_iterator fit;
-
-  KRT_TRACE(p, D_EVENTS, "Pruning inherited routes");
-
-  FIB_ITERATE_INIT(&fit, fib);
-again:
-  FIB_ITERATE_START(fib, &fit, net, n)
-    {
-      rte *e, **ee, *best, **pbest, *old_best;
-
-      /*
-       * Note that old_best may be NULL even if there was an old best route in
-       * the previous step, because it might be replaced in krt_learn_scan().
-       * But in that case there is a new valid best route.
-       */
-
-      old_best = NULL;
-      best = NULL;
-      pbest = NULL;
-      ee = &n->routes;
-      while (e = *ee)
-	{
-	  if (e->u.krt.best)
-	    old_best = e;
-
-	  if (!e->u.krt.seen)
-	    {
-	      *ee = e->next;
-	      rte_free(e);
-	      continue;
-	    }
-
-	  if (!best || best->u.krt.metric > e->u.krt.metric)
-	    {
-	      best = e;
-	      pbest = ee;
-	    }
-
-	  e->u.krt.seen = 0;
-	  e->u.krt.best = 0;
-	  ee = &e->next;
-	}
-      if (!n->routes)
-	{
-	  DBG("%I/%d: deleting\n", n->n.prefix, n->n.pxlen);
-	  if (old_best)
-	    krt_learn_announce_delete(p, n);
-
-	  FIB_ITERATE_PUT(&fit);
-	  fib_delete(fib, n);
-	  goto again;
-	}
-
-      best->u.krt.best = 1;
-      *pbest = best->next;
-      best->next = n->routes;
-      n->routes = best;
-
-      if ((best != old_best) || p->reload)
-	{
-	  DBG("%I/%d: announcing (metric=%d)\n", n->n.prefix, n->n.pxlen, best->u.krt.metric);
-	  krt_learn_announce_update(p, best);
-	}
-      else
-	DBG("%I/%d: uptodate (metric=%d)\n", n->n.prefix, n->n.pxlen, best->u.krt.metric);
-    }
-  FIB_ITERATE_END;
-
-  p->reload = 0;
+  rte_update(p->p.main_channel, e->net, &e0, e0.src);
+  rt_unlock_source(e0.src);
 }
 
 static void
 krt_learn_async(struct krt_proto *p, rte *e, int new)
 {
-  net *n0 = e->net;
-  net *n = net_get(&p->krt_table, n0->n.addr);
-  rte *g, **gg, *best, **bestp, *old_best;
-
-  e->attrs = rta_lookup(e->attrs);
-
-  old_best = n->routes;
-  for(gg=&n->routes; g = *gg; gg = &g->next)
-    if (krt_same_key(g, e))
-      break;
   if (new)
-    {
-      if (g)
-	{
-	  if (krt_uptodate(g, e))
-	    {
-	      krt_trace_in(p, e, "[alien async] same");
-	      rte_free(e);
-	      return;
-	    }
-	  krt_trace_in(p, e, "[alien async] updated");
-	  *gg = g->next;
-	  rte_free(g);
-	}
-      else
-	krt_trace_in(p, e, "[alien async] created");
+    return krt_learn_scan(p, e);
 
-      e->next = n->routes;
-      n->routes = e;
-    }
-  else if (!g)
-    {
-      krt_trace_in(p, e, "[alien async] delete failed");
-      rte_free(e);
-      return;
-    }
-  else
-    {
-      krt_trace_in(p, e, "[alien async] removed");
-      *gg = g->next;
-      rte_free(e);
-      rte_free(g);
-    }
-  best = n->routes;
-  bestp = &n->routes;
-  for(gg=&n->routes; g=*gg; gg=&g->next)
-  {
-    if (best->u.krt.metric > g->u.krt.metric)
-      {
-	best = g;
-	bestp = gg;
-      }
-
-    g->u.krt.best = 0;
-  }
-
-  if (best)
-    {
-      best->u.krt.best = 1;
-      *bestp = best->next;
-      best->next = n->routes;
-      n->routes = best;
-    }
-
-  if (best != old_best)
-    {
-      DBG("krt_learn_async: distributing change\n");
-      if (best)
-	krt_learn_announce_update(p, best);
-      else
-	krt_learn_announce_delete(p, n);
-    }
-}
-
-static void
-krt_learn_init(struct krt_proto *p)
-{
-  if (KRT_CF->learn)
-  {
-    struct rtable_config *cf = mb_allocz(p->p.pool, sizeof(struct rtable_config));
-    cf->name = "Inherited";
-    cf->addr_type = p->p.net_type;
-
-    rt_setup(p->p.pool, &p->krt_table, cf);
-  }
-}
-
-static void
-krt_dump(struct proto *P)
-{
-  struct krt_proto *p = (struct krt_proto *) P;
-
-  if (!KRT_CF->learn)
-    return;
-  debug("KRT: Table of inheritable routes\n");
-  rt_dump(&p->krt_table);
-}
-
-static void
-krt_dump_attrs(rte *e)
-{
-  debug(" [m=%d,p=%d]", e->u.krt.metric, e->u.krt.proto);
+  struct rte_src *src = rt_get_source(&p->p, krt_metric(e));
+  rte_update(p->p.main_channel, e->net, NULL, src);
+  rt_unlock_source(src);
 }
 
 #endif
@@ -542,79 +341,90 @@ krt_dump_attrs(rte *e)
 static inline int
 krt_is_installed(struct krt_proto *p, net *n)
 {
-  return n->routes && bmap_test(&p->p.main_channel->export_map, n->routes->id);
+  return n->routes && bmap_test(&p->p.main_channel->export_map, n->routes->rte.id);
+}
+
+static uint
+rte_feed_count(net *n)
+{
+  uint count = 0;
+  for (struct rte_storage *e = n->routes; e; e = e->next)
+    if (rte_is_valid(RTE_OR_NULL(e)))
+      count++;
+  return count;
 }
 
 static void
-krt_flush_routes(struct krt_proto *p)
+rte_feed_obtain(net *n, const rte **feed, uint count)
 {
-  struct rtable *t = p->p.main_channel->table;
-
-  KRT_TRACE(p, D_EVENTS, "Flushing kernel routes");
-  FIB_WALK(&t->fib, net, n)
+  uint i = 0;
+  for (struct rte_storage *e = n->routes; e; e = e->next)
+    if (rte_is_valid(RTE_OR_NULL(e)))
     {
-      if (krt_is_installed(p, n))
-	{
-	  /* FIXME: this does not work if gw is changed in export filter */
-	  krt_replace_rte(p, n, NULL, n->routes);
-	}
+      ASSERT_DIE(i < count);
+      feed[i++] = &e->rte;
     }
-  FIB_WALK_END;
+  ASSERT_DIE(i == count);
 }
 
 static struct rte *
-krt_export_net(struct krt_proto *p, net *net, rte **rt_free)
+krt_export_net(struct krt_proto *p, net *net)
 {
+  /* FIXME: Here we are calling filters in table-locked context when exporting
+   * to kernel. Here BIRD can crash if the user requested ROA check in kernel
+   * export filter. It doesn't make much sense to write the filters like this,
+   * therefore we may keep this unfinished piece of work here for later as it
+   * won't really affect anybody. */
+  ASSERT_DIE(RT_IS_LOCKED(p->p.main_channel->table));
+
   struct channel *c = p->p.main_channel;
   const struct filter *filter = c->out_filter;
-  rte *rt;
 
   if (c->ra_mode == RA_MERGED)
-    return rt_export_merged(c, net, rt_free, krt_filter_lp, 1);
+  {
+    uint count = rte_feed_count(net);
+    if (!count)
+      return NULL;
 
-  rt = net->routes;
-  *rt_free = NULL;
+    const rte **feed = alloca(count * sizeof(rte *));
+    rte_feed_obtain(net, feed, count);
+    return rt_export_merged(c, feed, count, krt_filter_lp, 1);
+  }
 
-  if (!rte_is_valid(rt))
+  static _Thread_local rte rt;
+  rt = net->routes->rte;
+
+  if (!rte_is_valid(&rt))
     return NULL;
 
   if (filter == FILTER_REJECT)
     return NULL;
-
-  rte_make_tmp_attrs(&rt, krt_filter_lp, NULL);
 
   /* We could run krt_preexport() here, but it is already handled by krt_is_installed() */
 
   if (filter == FILTER_ACCEPT)
     goto accept;
 
-  if (f_run(filter, &rt, krt_filter_lp, FF_SILENT) > F_ACCEPT)
+  if (f_run(filter, &rt, FF_SILENT) > F_ACCEPT)
     goto reject;
 
 
 accept:
-  if (rt != net->routes)
-    *rt_free = rt;
-  return rt;
+  return &rt;
 
 reject:
-  if (rt != net->routes)
-    rte_free(rt);
   return NULL;
 }
 
 static int
 krt_same_dest(rte *k, rte *e)
 {
-  rta *ka = k->attrs, *ea = e->attrs;
+  ea_list *ka = k->attrs, *ea = e->attrs;
 
-  if (ka->dest != ea->dest)
-    return 0;
+  eattr *nhea_k = ea_find(ka, &ea_gen_nexthop);
+  eattr *nhea_e = ea_find(ea, &ea_gen_nexthop);
 
-  if (ka->dest == RTD_UNICAST)
-    return nexthop_same(&(ka->nh), &(ea->nh));
-
-  return 1;
+  return (!nhea_k == !nhea_e) && adata_same(nhea_k->u.ptr, nhea_e->u.ptr);
 }
 
 /*
@@ -623,42 +433,50 @@ krt_same_dest(rte *k, rte *e)
  */
 
 void
-krt_got_route(struct krt_proto *p, rte *e)
+krt_got_route(struct krt_proto *p, rte *e, s8 src)
 {
-  rte *new = NULL, *rt_free = NULL;
-  net *n = e->net;
+  rte *new = NULL;
+  e->pflags = 0;
 
 #ifdef KRT_ALLOW_LEARN
-  switch (e->u.krt.src)
+  switch (src)
     {
     case KRT_SRC_KERNEL:
-      goto ignore;
+      krt_trace_in(p, e, "ignored");
+      return;
 
     case KRT_SRC_REDIRECT:
-      goto delete;
+      krt_trace_in(p, e, "deleting");
+      krt_replace_rte(p, e->net, NULL, e);
+      return;
 
     case  KRT_SRC_ALIEN:
       if (KRT_CF->learn)
 	krt_learn_scan(p, e);
       else
-	{
-	  krt_trace_in_rl(&rl_alien, p, e, "[alien] ignored");
-	  rte_free(e);
-	}
+	krt_trace_in_rl(&rl_alien, p, e, "[alien] ignored");
       return;
     }
 #endif
+
   /* The rest is for KRT_SRC_BIRD (or KRT_SRC_UNKNOWN) */
 
+  RT_LOCKED(p->p.main_channel->table, tab)
+  {
+
+  /* Deleting all routes if flush is requested */
+  if (p->flush_routes)
+    goto delete;
 
   /* We wait for the initial feed to have correct installed state */
   if (!p->ready)
     goto ignore;
 
-  if (!krt_is_installed(p, n))
+  net *net = net_find(tab, e->net);
+  if (!net || !krt_is_installed(p, net))
     goto delete;
 
-  new = krt_export_net(p, n, &rt_free);
+  new = krt_export_net(p, net);
 
   /* Rejected by filters */
   if (!new)
@@ -691,19 +509,16 @@ ignore:
 
 update:
   krt_trace_in(p, new, "updating");
-  krt_replace_rte(p, n, new, e);
+  krt_replace_rte(p, e->net, new, e);
   goto done;
 
 delete:
   krt_trace_in(p, e, "deleting");
-  krt_replace_rte(p, n, NULL, e);
+  krt_replace_rte(p, e->net, NULL, e);
   goto done;
 
-done:
-  rte_free(e);
-
-  if (rt_free)
-    rte_free(rt_free);
+done:;
+  }
 
   lp_flush(krt_filter_lp);
 }
@@ -717,45 +532,50 @@ krt_init_scan(struct krt_proto *p)
 static void
 krt_prune(struct krt_proto *p)
 {
-  struct rtable *t = p->p.main_channel->table;
+  RT_LOCKED(p->p.main_channel->table, t)
+  {
 
   KRT_TRACE(p, D_EVENTS, "Pruning table %s", t->name);
   FIB_WALK(&t->fib, net, n)
   {
-    if (p->ready && krt_is_installed(p, n) && !bmap_test(&p->seen_map, n->routes->id))
+    if (p->ready && krt_is_installed(p, n) && !bmap_test(&p->seen_map, n->routes->rte.id))
     {
-      rte *rt_free = NULL;
-      rte *new = krt_export_net(p, n, &rt_free);
+      rte *new = krt_export_net(p, n);
 
       if (new)
       {
 	krt_trace_in(p, new, "installing");
-	krt_replace_rte(p, n, new, NULL);
+	krt_replace_rte(p, n->n.addr, new, NULL);
       }
-
-      if (rt_free)
-	rte_free(rt_free);
 
       lp_flush(krt_filter_lp);
     }
   }
   FIB_WALK_END;
 
-#ifdef KRT_ALLOW_LEARN
-  if (KRT_CF->learn)
-    krt_learn_prune(p);
-#endif
-
   if (p->ready)
     p->initialized = 1;
+
+  }
+}
+
+static void
+krt_flush_routes(struct krt_proto *p)
+{
+  KRT_TRACE(p, D_EVENTS, "Flushing kernel routes");
+  p->flush_routes = 1;
+  krt_init_scan(p);
+  krt_do_scan(p);
+  /* No prune! */
+  p->flush_routes = 0;
 }
 
 void
-krt_got_route_async(struct krt_proto *p, rte *e, int new)
+krt_got_route_async(struct krt_proto *p, rte *e, int new, s8 src)
 {
-  net *net = e->net;
+  e->pflags = 0;
 
-  switch (e->u.krt.src)
+  switch (src)
     {
     case KRT_SRC_BIRD:
       /* Should be filtered by the back end */
@@ -765,7 +585,7 @@ krt_got_route_async(struct krt_proto *p, rte *e, int new)
       if (new)
 	{
 	  krt_trace_in(p, e, "[redirect] deleting");
-	  krt_replace_rte(p, net, NULL, e);
+	  krt_replace_rte(p, e->net, NULL, e);
 	}
       /* If !new, it is probably echo of our deletion */
       break;
@@ -779,21 +599,19 @@ krt_got_route_async(struct krt_proto *p, rte *e, int new)
 	}
 #endif
     }
-  rte_free(e);
 }
+
 
 /*
  *	Periodic scanning
  */
 
-
-#ifdef CONFIG_ALL_TABLES_AT_ONCE
-
-static timer *krt_scan_timer;
-static int krt_scan_count;
+static timer *krt_scan_all_timer;
+static int krt_scan_all_count;
+static _Bool krt_scan_all_tables;
 
 static void
-krt_scan(timer *t UNUSED)
+krt_scan_all(timer *t UNUSED)
 {
   struct krt_proto *p;
   node *n;
@@ -814,35 +632,42 @@ krt_scan(timer *t UNUSED)
 }
 
 static void
-krt_scan_timer_start(struct krt_proto *p)
+krt_scan_all_timer_start(struct krt_proto *p)
 {
-  if (!krt_scan_count)
-    krt_scan_timer = tm_new_init(krt_pool, krt_scan, NULL, KRT_CF->scan_time, 0);
+  if (!krt_scan_all_count)
+    krt_scan_all_timer = tm_new_init(krt_pool, krt_scan_all, NULL, KRT_CF->scan_time, 0);
 
-  krt_scan_count++;
+  krt_scan_all_count++;
 
-  tm_start(krt_scan_timer, 1 S);
+  tm_start(krt_scan_all_timer, 1 S);
 }
 
 static void
-krt_scan_timer_stop(struct krt_proto *p UNUSED)
+krt_scan_all_timer_stop(void)
 {
-  krt_scan_count--;
+  ASSERT(krt_scan_all_count > 0);
 
-  if (!krt_scan_count)
+  krt_scan_all_count--;
+
+  if (!krt_scan_all_count)
   {
-    rfree(krt_scan_timer);
-    krt_scan_timer = NULL;
+    rfree(krt_scan_all_timer);
+    krt_scan_all_timer = NULL;
   }
 }
 
 static void
-krt_scan_timer_kick(struct krt_proto *p UNUSED)
+krt_scan_all_timer_kick(void)
 {
-  tm_start(krt_scan_timer, 0);
+  tm_start(krt_scan_all_timer, 0);
 }
 
-#else
+void
+krt_use_shared_scan(void)
+{
+  krt_scan_all_tables = 1;
+}
+
 
 static void
 krt_scan(timer *t)
@@ -860,55 +685,47 @@ krt_scan(timer *t)
 static void
 krt_scan_timer_start(struct krt_proto *p)
 {
-  p->scan_timer = tm_new_init(p->p.pool, krt_scan, p, KRT_CF->scan_time, 0);
-  tm_start(p->scan_timer, 1 S);
+  if (krt_scan_all_tables)
+    krt_scan_all_timer_start(p);
+  else
+  {
+    p->scan_timer = tm_new_init(p->p.pool, krt_scan, p, KRT_CF->scan_time, 0);
+    tm_start(p->scan_timer, 1 S);
+  }
 }
 
 static void
 krt_scan_timer_stop(struct krt_proto *p)
 {
-  tm_stop(p->scan_timer);
+  if (krt_scan_all_tables)
+    krt_scan_all_timer_stop();
+  else
+    tm_stop(p->scan_timer);
 }
 
 static void
 krt_scan_timer_kick(struct krt_proto *p)
 {
-  tm_start(p->scan_timer, 0);
+  if (krt_scan_all_tables)
+    krt_scan_all_timer_kick();
+  else
+    tm_start(p->scan_timer, 0);
 }
-
-#endif
-
-
 
 
 /*
  *	Updates
  */
 
-static void
-krt_make_tmp_attrs(struct rte *rt, struct linpool *pool)
-{
-  rte_init_tmp_attrs(rt, pool, 2);
-  rte_make_tmp_attr(rt, EA_KRT_SOURCE, EAF_TYPE_INT, rt->u.krt.proto);
-  rte_make_tmp_attr(rt, EA_KRT_METRIC, EAF_TYPE_INT, rt->u.krt.metric);
-}
-
-static void
-krt_store_tmp_attrs(struct rte *rt, struct linpool *pool)
-{
-  rte_init_tmp_attrs(rt, pool, 2);
-  rt->u.krt.proto = rte_store_tmp_attr(rt, EA_KRT_SOURCE);
-  rt->u.krt.metric = rte_store_tmp_attr(rt, EA_KRT_METRIC);
-}
-
 static int
-krt_preexport(struct proto *P, rte **new, struct linpool *pool UNUSED)
+krt_preexport(struct channel *C, rte *e)
 {
-  // struct krt_proto *p = (struct krt_proto *) P;
-  rte *e = *new;
-
-  if (e->attrs->src->proto == P)
+  if (e->src->owner == &C->proto->sources)
+#ifdef CONFIG_SINGLE_ROUTE
+    return 1;
+#else
     return -1;
+#endif
 
   if (!krt_capable(e))
     return -1;
@@ -917,8 +734,8 @@ krt_preexport(struct proto *P, rte **new, struct linpool *pool UNUSED)
 }
 
 static void
-krt_rt_notify(struct proto *P, struct channel *ch UNUSED, net *net,
-	      rte *new, rte *old)
+krt_rt_notify(struct proto *P, struct channel *ch UNUSED, const net_addr *net,
+	      rte *new, const rte *old)
 {
   struct krt_proto *p = (struct krt_proto *) P;
 
@@ -926,14 +743,8 @@ krt_rt_notify(struct proto *P, struct channel *ch UNUSED, net *net,
     return;
 
 #ifdef CONFIG_SINGLE_ROUTE
-  /*
-   * Implicit withdraw - when the imported kernel route becomes the best one,
-   * we know that the previous one exported to the kernel was already removed,
-   * but if we processed the update as usual, we would send withdraw to the
-   * kernel, which would remove the new imported route instead.
-   */
-  rte *best = net->routes;
-  if (!new && best && (best->attrs->src->proto == P))
+  /* Got the same route as we imported. Keep it, do nothing. */
+  if (new && new->src->owner == &P->sources)
     return;
 #endif
 
@@ -981,14 +792,14 @@ krt_feed_end(struct channel *C)
   krt_scan_timer_kick(p);
 }
 
-
 static int
-krt_rte_same(rte *a, rte *b)
+krt_rte_better(const rte *new, const rte *old)
 {
-  /* src is always KRT_SRC_ALIEN and type is irrelevant */
-  return (a->u.krt.proto == b->u.krt.proto) && (a->u.krt.metric == b->u.krt.metric);
-}
+  u32 n = ea_get_int(new->attrs, &ea_krt_metric, IGP_METRIC_UNKNOWN);
+  u32 o = ea_get_int(old->attrs, &ea_krt_metric, IGP_METRIC_UNKNOWN);
 
+  return (n < o);
+}
 
 /*
  *	Protocol glue
@@ -1008,13 +819,12 @@ krt_postconfig(struct proto_config *CF)
 {
   struct krt_config *cf = (void *) CF;
 
-  if (EMPTY_LIST(CF->channels))
-    cf_error("Channel not specified");
+  /* Do not check templates at all */
+  if (cf->c.class == SYM_TEMPLATE)
+    return;
 
-#ifdef CONFIG_ALL_TABLES_AT_ONCE
-  if (krt_cf->scan_time != cf->scan_time)
-    cf_error("All kernel syncers must use the same table scan interval");
-#endif
+  if (! proto_cf_main_channel(CF))
+    cf_error("Channel not specified");
 
   struct channel_config *cc = proto_cf_main_channel(CF);
   struct rtable_config *tab = cc->table;
@@ -1031,6 +841,10 @@ krt_postconfig(struct proto_config *CF)
   krt_sys_postconfig(cf);
 }
 
+struct rte_owner_class krt_rte_owner_class = {
+  .rte_better = krt_rte_better,
+};
+
 static struct proto *
 krt_init(struct proto_config *CF)
 {
@@ -1041,12 +855,11 @@ krt_init(struct proto_config *CF)
 
   p->p.preexport = krt_preexport;
   p->p.rt_notify = krt_rt_notify;
-  p->p.if_notify = krt_if_notify;
+  p->p.iface_sub.if_notify = krt_if_notify;
   p->p.reload_routes = krt_reload_routes;
   p->p.feed_end = krt_feed_end;
-  p->p.make_tmp_attrs = krt_make_tmp_attrs;
-  p->p.store_tmp_attrs = krt_store_tmp_attrs;
-  p->p.rte_same = krt_rte_same;
+
+  p->p.sources.class = &krt_rte_owner_class;
 
   krt_sys_init(p);
   return &p->p;
@@ -1071,10 +884,6 @@ krt_start(struct proto *P)
   bmap_init(&p->sync_map, p->p.pool, 1024);
   bmap_init(&p->seen_map, p->p.pool, 1024);
   add_tail(&krt_proto_list, &p->krt_node);
-
-#ifdef KRT_ALLOW_LEARN
-  krt_learn_init(p);
-#endif
 
   if (!krt_sys_start(p))
   {
@@ -1155,24 +964,15 @@ krt_copy_config(struct proto_config *dest, struct proto_config *src)
   krt_sys_copy_config(d, s);
 }
 
-static int
-krt_get_attr(const eattr *a, byte *buf, int buflen)
-{
-  switch (a->id)
-  {
-  case EA_KRT_SOURCE:
-    bsprintf(buf, "source");
-    return GA_NAME;
+struct ea_class ea_krt_source = {
+  .name = "krt_source",
+  .type = T_INT,
+};
 
-  case EA_KRT_METRIC:
-    bsprintf(buf, "metric");
-    return GA_NAME;
-
-  default:
-    return krt_sys_get_attr(a, buf, buflen);
-  }
-}
-
+struct ea_class ea_krt_metric = {
+  .name = "krt_metric",
+  .type = T_INT,
+};
 
 #ifdef CONFIG_IP6_SADR_KERNEL
 #define MAYBE_IP6_SADR	NB_IP6_SADR
@@ -1189,7 +989,6 @@ krt_get_attr(const eattr *a, byte *buf, int buflen)
 struct protocol proto_unix_kernel = {
   .name =		"Kernel",
   .template =		"kernel%d",
-  .class =		PROTOCOL_KERNEL,
   .preference =		DEF_PREF_INHERITED,
   .channel_mask =	NB_IP | MAYBE_IP6_SADR | MAYBE_MPLS,
   .proto_size =		sizeof(struct krt_proto),
@@ -1201,9 +1000,15 @@ struct protocol proto_unix_kernel = {
   .shutdown =		krt_shutdown,
   .reconfigure =	krt_reconfigure,
   .copy_config =	krt_copy_config,
-  .get_attr =		krt_get_attr,
-#ifdef KRT_ALLOW_LEARN
-  .dump =		krt_dump,
-  .dump_attrs =		krt_dump_attrs,
-#endif
 };
+
+void
+krt_build(void)
+{
+  proto_build(&proto_unix_kernel);
+
+  EA_REGISTER_ALL(
+      &ea_krt_source,
+      &ea_krt_metric,
+      );
+}

@@ -17,6 +17,7 @@ CF_HDR
 
 CF_DEFINES
 
+static struct rtable_config *this_table;
 static struct proto_config *this_proto;
 static struct channel_config *this_channel;
 static struct iface_patt *this_ipatt;
@@ -25,6 +26,7 @@ static struct iface_patt_node *this_ipn;
 static list *this_p_list;
 static struct password_item *this_p_item;
 static int password_id;
+static struct bfd_options *this_bfd_opts;
 
 static void
 iface_patt_check(void)
@@ -36,6 +38,30 @@ iface_patt_check(void)
       cf_error("Interface name/mask expected, not IP prefix");
 }
 
+static inline void
+init_password_list(void)
+{
+   if (!this_p_list) {
+      this_p_list = cfg_allocz(sizeof(list));
+      init_list(this_p_list);
+      password_id = 1;
+   }
+}
+
+static inline void
+init_password(const void *key, uint length, uint id)
+{
+   this_p_item = cfg_allocz(sizeof (struct password_item));
+   this_p_item->password = key;
+   this_p_item->length = length;
+   this_p_item->genfrom = 0;
+   this_p_item->gento = TIME_INFINITY;
+   this_p_item->accfrom = 0;
+   this_p_item->accto = TIME_INFINITY;
+   this_p_item->id = id;
+   this_p_item->alg = ALG_UNDEFINED;
+   add_tail(this_p_list, &this_p_item->n);
+}
 
 static inline void
 reset_passwords(void)
@@ -51,6 +77,28 @@ get_passwords(void)
   return rv;
 }
 
+static inline void
+init_bfd_opts(struct bfd_options **opts)
+{
+  cf_check_bfd(1);
+
+  if (! *opts)
+    *opts = bfd_new_options();
+}
+
+static inline void
+open_bfd_opts(struct bfd_options **opts)
+{
+  init_bfd_opts(opts);
+  this_bfd_opts = *opts;
+}
+
+static inline void
+close_bfd_opts(void)
+{
+  this_bfd_opts = NULL;
+}
+
 static void
 proto_postconfig(void)
 {
@@ -64,26 +112,28 @@ proto_postconfig(void)
 
 CF_DECLS
 
-CF_KEYWORDS(ROUTER, ID, PROTOCOL, TEMPLATE, PREFERENCE, DISABLED, DEBUG, ALL, OFF, DIRECT)
+CF_KEYWORDS(ROUTER, ID, HOSTNAME, PROTOCOL, TEMPLATE, PREFERENCE, DISABLED, DEBUG, ALL, OFF, DIRECT, PIPE)
 CF_KEYWORDS(INTERFACE, IMPORT, EXPORT, FILTER, NONE, VRF, DEFAULT, TABLE, STATES, ROUTES, FILTERS)
 CF_KEYWORDS(IPV4, IPV6, VPN4, VPN6, ROA4, ROA6, FLOW4, FLOW6, SADR, MPLS)
-CF_KEYWORDS(RECEIVE, LIMIT, ACTION, WARN, BLOCK, RESTART, DISABLE, KEEP, FILTERED)
-CF_KEYWORDS(PASSWORD, FROM, PASSIVE, TO, ID, EVENTS, PACKETS, PROTOCOLS, INTERFACES)
-CF_KEYWORDS(ALGORITHM, KEYED, HMAC, MD5, SHA1, SHA256, SHA384, SHA512)
-CF_KEYWORDS(PRIMARY, STATS, COUNT, BY, FOR, COMMANDS, PREEXPORT, NOEXPORT, EXPORTED, GENERATE)
-CF_KEYWORDS(BGP, PASSWORDS, DESCRIPTION, SORTED)
-CF_KEYWORDS(RELOAD, IN, OUT, MRTDUMP, MESSAGES, RESTRICT, MEMORY, IGP_METRIC, CLASS, DSCP)
+CF_KEYWORDS(RECEIVE, LIMIT, ACTION, WARN, BLOCK, RESTART, DISABLE, KEEP, FILTERED, RPKI)
+CF_KEYWORDS(PASSWORD, KEY, FROM, PASSIVE, TO, ID, EVENTS, PACKETS, PROTOCOLS, CHANNELS, INTERFACES)
+CF_KEYWORDS(ALGORITHM, KEYED, HMAC, MD5, SHA1, SHA256, SHA384, SHA512, BLAKE2S128, BLAKE2S256, BLAKE2B256, BLAKE2B512)
+CF_KEYWORDS(PRIMARY, STATS, COUNT, FOR, IN, COMMANDS, PREEXPORT, NOEXPORT, EXPORTED, GENERATE)
+CF_KEYWORDS(BGP, PASSWORDS, DESCRIPTION)
+CF_KEYWORDS(RELOAD, IN, OUT, MRTDUMP, MESSAGES, RESTRICT, MEMORY, CLASS, DSCP)
 CF_KEYWORDS(TIMEFORMAT, ISO, SHORT, LONG, ROUTE, PROTOCOL, BASE, LOG, S, MS, US)
-CF_KEYWORDS(GRACEFUL, RESTART, WAIT, MAX, FLUSH, AS)
+CF_KEYWORDS(GRACEFUL, RESTART, WAIT, MAX, AS)
+CF_KEYWORDS(MIN, IDLE, RX, TX, INTERVAL, MULTIPLIER, PASSIVE)
 CF_KEYWORDS(CHECK, LINK)
+CF_KEYWORDS(CORK, SORTED, TRIE, MIN, MAX, ROA, ROUTE, REFRESH, SETTLE, TIME, GC, THRESHOLD, PERIOD)
 
 /* For r_args_channel */
 CF_KEYWORDS(IPV4, IPV4_MC, IPV4_MPLS, IPV6, IPV6_MC, IPV6_MPLS, IPV6_SADR, VPN4, VPN4_MC, VPN4_MPLS, VPN6, VPN6_MC, VPN6_MPLS, ROA4, ROA6, FLOW4, FLOW6, MPLS, PRI, SEC)
 
-CF_ENUM(T_ENUM_RTS, RTS_, DUMMY, STATIC, INHERIT, DEVICE, STATIC_DEVICE, REDIRECT,
+CF_ENUM(T_ENUM_RTS, RTS_, STATIC, INHERIT, DEVICE, STATIC_DEVICE, REDIRECT,
 	RIP, OSPF, OSPF_IA, OSPF_EXT1, OSPF_EXT2, BGP, PIPE, BABEL)
 CF_ENUM(T_ENUM_SCOPE, SCOPE_, HOST, LINK, SITE, ORGANIZATION, UNIVERSE, UNDEFINED)
-CF_ENUM(T_ENUM_RTD, RTD_, UNICAST, BLACKHOLE, UNREACHABLE, PROHIBIT)
+CF_ENUM(T_ENUM_RTD, RTD_, BLACKHOLE, UNREACHABLE, PROHIBIT)
 CF_ENUM(T_ENUM_ROA, ROA_, UNKNOWN, VALID, INVALID)
 CF_ENUM_PX(T_ENUM_AF, AF_, AFI_, IPV4, IPV6)
 
@@ -93,13 +143,14 @@ CF_ENUM_PX(T_ENUM_AF, AF_, AFI_, IPV4, IPV6)
 %type <s> optproto
 %type <ra> r_args
 %type <sd> sym_args
-%type <i> proto_start echo_mask echo_size debug_mask debug_list debug_flag mrtdump_mask mrtdump_list mrtdump_flag export_mode limit_action net_type table_sorted tos password_algorithm
+%type <i> proto_start echo_mask echo_size debug_mask debug_list debug_flag mrtdump_mask mrtdump_list mrtdump_flag export_mode limit_action net_type tos password_algorithm
 %type <ps> proto_patt proto_patt2
 %type <cc> channel_start proto_channel
 %type <cl> limit_spec
 %type <net> r_args_for_val
 %type <net_ptr> r_args_for
-%type <t> r_args_channel
+%type <t> channel_sym
+%type <c> channel_arg
 
 CF_GRAMMAR
 
@@ -114,7 +165,7 @@ rtrid:
 
 idval:
    NUM { $$ = $1; }
- | '(' term ')' { $$ = f_eval_int(f_linearize($2)); }
+ | '(' term ')' { $$ = f_eval_int(f_linearize($2, 1)); }
  | IP4 { $$ = ip4_to_u32($1); }
  | CF_SYM_KNOWN {
      if ($1->class == (SYM_CONSTANT | T_INT) || $1->class == (SYM_CONSTANT | T_QUAD))
@@ -125,6 +176,10 @@ idval:
        cf_error("Number or IPv4 address constant expected");
    }
  ;
+
+conf: hostname_override ;
+
+hostname_override: HOSTNAME text ';' { new_config->hostname = $2; } ;
 
 conf: gr_opts ;
 
@@ -153,16 +208,44 @@ CF_ENUM(T_ENUM_NETTYPE, NET_, IP4, IP6, VPN4, VPN6, ROA4, ROA6, FLOW4, FLOW6, IP
 
 conf: table ;
 
-table_sorted:
-	  { $$ = 0; }
- | SORTED { $$ = 1; }
+table: table_start table_sorted table_opt_list ;
+
+table_start: net_type TABLE symbol {
+   this_table = rt_new_table($3, $1);
+   }
  ;
 
-table: net_type TABLE symbol table_sorted {
-   struct rtable_config *cf;
-   cf = rt_new_table($3, $1);
-   cf->sorted = $4;
+table_sorted:
+   /* empty */
+ | SORTED { this_table->sorted = 1; }
+ ;
+
+table_opt:
+   SORTED bool { this_table->sorted = $2; }
+ | TRIE bool {
+     if (!net_val_match(this_table->addr_type, NB_IP | NB_VPN | NB_ROA | NB_IP6_SADR))
+       cf_error("Trie option not supported for %s table", net_label[this_table->addr_type]);
+     this_table->trie_used = $2;
    }
+ | GC THRESHOLD expr { this_table->gc_threshold = $3; }
+ | GC PERIOD expr_us { this_table->gc_period = (uint) $3; if ($3 > 3600 S_) cf_error("GC period must be at most 3600 s"); }
+ | CORK THRESHOLD expr expr {
+     if ($3 > $4) cf_error("Cork low threshold must be lower than the high threshold.");
+     this_table->cork_threshold.low = $3;
+     this_table->cork_threshold.high = $4; }
+ | EXPORT SETTLE TIME settle { this_table->export_settle = $4; }
+ | ROUTE REFRESH EXPORT SETTLE TIME settle { this_table->export_rr_settle = $6; }
+ | DEBUG bool { this_table->debug = $2; }
+ ;
+
+table_opts:
+   /* empty */
+ | table_opts table_opt ';'
+ ;
+
+table_opt_list:
+   /* empty */
+ | '{' table_opts '}'
  ;
 
 
@@ -213,8 +296,8 @@ proto_item:
  | MRTDUMP mrtdump_mask { this_proto->mrtdump = $2; }
  | ROUTER ID idval { this_proto->router_id = $3; }
  | DESCRIPTION text { this_proto->dsc = $2; }
- | VRF text { this_proto->vrf = if_get_by_name($2); this_proto->vrf_set = 1; }
- | VRF DEFAULT { this_proto->vrf = NULL; this_proto->vrf_set = 1; }
+ | VRF text { this_proto->vrf = if_get_by_name($2); }
+ | VRF DEFAULT { this_proto->vrf = &default_vrf; }
  ;
 
 
@@ -223,19 +306,41 @@ channel_start: net_type
   $$ = this_channel = channel_config_get(NULL, net_label[$1], $1, this_proto);
 };
 
-channel_item:
+channel_item_:
    TABLE rtable {
      if (this_channel->net_type && ($2->addr_type != this_channel->net_type))
        cf_error("Incompatible table type");
      this_channel->table = $2;
    }
  | IMPORT imexport { this_channel->in_filter = $2; }
+ | EXPORT IN net_any imexport {
+     if (this_channel->net_type && ($3->type != this_channel->net_type))
+       cf_error("Incompatible export prefilter type");
+     this_channel->out_subprefix = $3;
+     this_channel->out_filter = $4;
+   }
  | EXPORT imexport { this_channel->out_filter = $2; }
+ | EXPORT BLOCK expr { this_channel->feed_block_size = $3; }
  | RECEIVE LIMIT limit_spec { this_channel->rx_limit = $3; }
  | IMPORT LIMIT limit_spec { this_channel->in_limit = $3; }
  | EXPORT LIMIT limit_spec { this_channel->out_limit = $3; }
+ | ROA SETTLE TIME settle { this_channel->roa_settle = $4; }
  | PREFERENCE expr { this_channel->preference = $2; check_u16($2); }
- | IMPORT KEEP FILTERED bool { this_channel->in_keep_filtered = $4; }
+ | IMPORT KEEP FILTERED bool {
+     if ($4)
+       this_channel->in_keep |= RIK_REJECTED;
+     else if ((this_channel->in_keep & RIK_PREFILTER) == RIK_PREFILTER)
+       cf_error("Import keep filtered is implied by the import table.");
+     else
+       this_channel->in_keep &= ~RIK_REJECTED;
+   }
+ | RPKI RELOAD bool { this_channel->rpki_reload = $3; }
+ ;
+
+/* To avoid grammar collision in Pipe protocol */
+channel_item:
+   channel_item_
+ | DEBUG debug_mask { this_channel->debug = $2; }
  ;
 
 channel_opts:
@@ -259,7 +364,11 @@ channel_end:
 proto_channel: channel_start channel_opt_list channel_end;
 
 
-rtable: CF_SYM_KNOWN { cf_assert_symbol($1, SYM_TABLE); $$ = $1->table; } ;
+rtable: CF_SYM_KNOWN {
+  cf_assert_symbol($1, SYM_TABLE);
+  if (!$1->table) rt_new_default_table($1);
+  $$ = $1->table;
+} ;
 
 imexport:
    FILTER filter { $$ = $2; }
@@ -286,7 +395,9 @@ conf: debug_default ;
 
 debug_default:
    DEBUG PROTOCOLS debug_mask { new_config->proto_default_debug = $3; }
+ | DEBUG CHANNELS debug_mask { new_config->channel_default_debug = $3; }
  | DEBUG COMMANDS expr { new_config->cli_debug = $3; }
+ | DEBUG TABLES debug_mask { new_config->table_debug = $3; }
  ;
 
 /* MRTDUMP PROTOCOLS is in systep/unix/config.Y */
@@ -314,7 +425,6 @@ timeformat_spec:
 timeformat_base:
    TIMEFORMAT timeformat_spec ';'
  ;
-
 
 /* Interface patterns */
 
@@ -372,6 +482,7 @@ proto: dev_proto '}' ;
 dev_proto_start: proto_start DIRECT {
      this_proto = proto_config_new(&proto_device, $1);
      init_list(&DIRECT_CFG->iface_list);
+     this_proto->late_if_feed = 1;
    }
  ;
 
@@ -438,6 +549,10 @@ mrtdump_flag:
 /* Password lists */
 
 password_list:
+   password_list_body
+;
+
+password_list_body:
    PASSWORDS '{' password_items '}'
  | password_item
 ;
@@ -448,28 +563,15 @@ password_items:
 ;
 
 password_item:
-    password_item_begin '{' password_item_params '}'
-  | password_item_begin
+    password_item_begin '{' password_item_params '}' password_item_end
+  | password_item_begin password_item_end
 ;
 
+pass_key: PASSWORD | KEY;
+
 password_item_begin:
-   PASSWORD text {
-     if (!this_p_list) {
-	this_p_list = cfg_alloc(sizeof(list));
-	init_list(this_p_list);
-	password_id = 1;
-     }
-     this_p_item = cfg_alloc(sizeof (struct password_item));
-     this_p_item->password = $2;
-     this_p_item->length = strlen($2);
-     this_p_item->genfrom = 0;
-     this_p_item->gento = TIME_INFINITY;
-     this_p_item->accfrom = 0;
-     this_p_item->accto = TIME_INFINITY;
-     this_p_item->id = password_id++;
-     this_p_item->alg = ALG_UNDEFINED;
-     add_tail(this_p_list, &this_p_item->n);
-   }
+    pass_key text { init_password_list(); init_password($2, strlen($2), password_id++); }
+  | pass_key BYTESTRING { init_password_list(); init_password($2->data, $2->length, password_id++); }
 ;
 
 password_item_params:
@@ -495,6 +597,37 @@ password_algorithm:
  | HMAC SHA256	{ $$ = ALG_HMAC_SHA256; }
  | HMAC SHA384	{ $$ = ALG_HMAC_SHA384; }
  | HMAC SHA512	{ $$ = ALG_HMAC_SHA512; }
+ | BLAKE2S128	{ $$ = ALG_BLAKE2S_128; }
+ | BLAKE2S256	{ $$ = ALG_BLAKE2S_256; }
+ | BLAKE2B256	{ $$ = ALG_BLAKE2B_256; }
+ | BLAKE2B512	{ $$ = ALG_BLAKE2B_512; }
+ ;
+
+password_item_end:
+{
+  password_validate_length(this_p_item);
+};
+
+
+/* BFD options */
+
+bfd_item:
+   INTERVAL expr_us { this_bfd_opts->min_rx_int = this_bfd_opts->min_tx_int = $2; }
+ | MIN RX INTERVAL expr_us { this_bfd_opts->min_rx_int = $4; }
+ | MIN TX INTERVAL expr_us { this_bfd_opts->min_tx_int = $4; }
+ | IDLE TX INTERVAL expr_us { this_bfd_opts->idle_tx_int = $4; }
+ | MULTIPLIER expr { this_bfd_opts->multiplier = $2; }
+ | PASSIVE bool { this_bfd_opts->passive = $2; this_bfd_opts->passive_set = 1; }
+ | GRACEFUL { this_bfd_opts->mode = BGP_BFD_GRACEFUL; }
+ ;
+
+bfd_items:
+   /* empty */
+ | bfd_items bfd_item ';'
+ ;
+
+bfd_opts:
+   '{' bfd_items '}'
  ;
 
 /* Core commands */
@@ -524,7 +657,7 @@ CF_CLI(SHOW INTERFACES SUMMARY,,, [[Show summary of network interfaces]])
 { if_show_summary(); } ;
 
 CF_CLI_HELP(SHOW ROUTE, ..., [[Show routing table]])
-CF_CLI(SHOW ROUTE, r_args, [[[<prefix>|for <prefix>|for <ip>] [table <t>] [filter <f>|where <cond>] [all] [primary] [filtered] [(export|preexport|noexport) <p>] [protocol <p>] [stats|count]]], [[Show routing table]])
+CF_CLI(SHOW ROUTE, r_args, [[[<prefix>|for <prefix>|for <ip>|in <prefix>] [table <t>] [(import|export) table <p>.<c>] [filter <f>|where <cond>] [all] [primary] [filtered] [(export|preexport|noexport) <p>] [protocol <p>] [stats|count]]], [[Show routing table]])
 { rt_show($3); } ;
 
 r_args:
@@ -532,21 +665,31 @@ r_args:
      $$ = cfg_allocz(sizeof(struct rt_show_data));
      init_list(&($$->tables));
      $$->filter = FILTER_ACCEPT;
-     $$->running_on_config = new_config->fallback;
+     $$->running_on_config = config;
+     $$->cli = this_cli;
    }
  | r_args net_any {
      $$ = $1;
      if ($$->addr) cf_error("Only one prefix expected");
      $$->addr = $2;
+     $$->addr_mode = TE_ADDR_EQUAL;
    }
  | r_args FOR r_args_for {
      $$ = $1;
      if ($$->addr) cf_error("Only one prefix expected");
-     $$->show_for = 1;
      $$->addr = $3;
+     $$->addr_mode = TE_ADDR_FOR;
    }
- | r_args TABLE CF_SYM_KNOWN {
+ | r_args IN net_any {
+     $$ = $1;
+     if ($$->addr) cf_error("Only one prefix expected");
+     if (!net_type_match($3, NB_IP)) cf_error("Only IP networks accepted for 'in' argument");
+     $$->addr = $3;
+     $$->addr_mode = TE_ADDR_IN;
+   }
+| r_args TABLE symbol_known {
      cf_assert_symbol($3, SYM_TABLE);
+     if (!$3->table) cf_error("Table %s not configured", $3->name);
      $$ = $1;
      rt_show_add_table($$, $3->table->table);
      $$->tables_defined_by = RSD_TDB_DIRECT;
@@ -558,26 +701,15 @@ r_args:
        rt_show_add_table($$, t->table);
      $$->tables_defined_by = RSD_TDB_ALL;
    }
- | r_args IMPORT TABLE CF_SYM_KNOWN '.' r_args_channel {
-     cf_assert_symbol($4, SYM_PROTO);
-     $$ = $1;
-     struct proto_config *cf = $4->proto;
-     if (!cf->proto) cf_error("%s is not a protocol", $4->name);
-     struct channel *c = proto_find_channel_by_name(cf->proto, $6);
-     if (!c) cf_error("Channel %s.%s not found", $4->name, $6);
-     if (!c->in_table) cf_error("No import table in channel %s.%s", $4->name, $6);
-     rt_show_add_table($$, c->in_table);
+ | r_args IMPORT TABLE channel_arg {
+     if (!($4->in_keep & RIK_PREFILTER)) cf_error("No import table in channel %s.%s", $4->proto->name, $4->name);
+     RT_LOCKED($4->table, tab)
+       rt_show_add_exporter($$, &tab->exporter.e, "import")->prefilter = $4;
      $$->tables_defined_by = RSD_TDB_DIRECT;
    }
- | r_args EXPORT TABLE CF_SYM_KNOWN '.' r_args_channel {
-     cf_assert_symbol($4, SYM_PROTO);
-     $$ = $1;
-     struct proto_config *cf = $4->proto;
-     if (!cf->proto) cf_error("%s is not a protocol", $4->name);
-     struct channel *c = proto_find_channel_by_name(cf->proto, $6);
-     if (!c) cf_error("Channel %s.%s not found", $4->name, $6);
-     if (!c->out_table) cf_error("No export table in channel %s.%s", $4->name, $6);
-     rt_show_add_table($$, c->out_table);
+ | r_args EXPORT TABLE channel_arg {
+     if (!$4->out_table) cf_error("No export table in channel %s.%s", $4->proto->name, $4->name);
+     rt_show_add_exporter($$, $4->out_table, "export");
      $$->tables_defined_by = RSD_TDB_DIRECT;
    }
  | r_args FILTER filter {
@@ -602,7 +734,7 @@ r_args:
      $$ = $1;
      $$->filtered = 1;
    }
- | r_args export_mode CF_SYM_KNOWN {
+ | r_args export_mode symbol_known {
      cf_assert_symbol($3, SYM_PROTO);
      struct proto_config *c = (struct proto_config *) $3->proto;
      $$ = $1;
@@ -612,18 +744,14 @@ r_args:
      $$->export_protocol = c->proto;
      $$->tables_defined_by = RSD_TDB_INDIRECT;
    }
- | r_args export_mode CF_SYM_KNOWN '.' r_args_channel {
-     cf_assert_symbol($3, SYM_PROTO);
-     struct proto_config *c = (struct proto_config *) $3->proto;
+ | r_args export_mode channel_arg {
      $$ = $1;
      if ($$->export_mode) cf_error("Export specified twice");
-     if (!c->proto) cf_error("%s is not a protocol", $3->name);
      $$->export_mode = $2;
-     $$->export_channel = proto_find_channel_by_name(c->proto, $5);
-     if (!$$->export_channel) cf_error("Export channel not found");
+     $$->export_channel = $3;
      $$->tables_defined_by = RSD_TDB_INDIRECT;
    }
- | r_args PROTOCOL CF_SYM_KNOWN {
+ | r_args PROTOCOL symbol_known {
      cf_assert_symbol($3, SYM_PROTO);
      struct proto_config *c = (struct proto_config *) $3->proto;
      $$ = $1;
@@ -689,7 +817,7 @@ export_mode:
  ;
 
 /* This is ugly hack */
-r_args_channel:
+channel_sym:
    IPV4		{ $$ = "ipv4"; }
  | IPV4_MC	{ $$ = "ipv4-mc"; }
  | IPV4_MPLS	{ $$ = "ipv4-mpls"; }
@@ -712,6 +840,16 @@ r_args_channel:
  | SEC		{ $$ = "sec"; }
  ;
 
+channel_arg:
+   CF_SYM_KNOWN '.' channel_sym {
+     cf_assert_symbol($1, SYM_PROTO);
+     struct proto *p =  $1->proto->proto;
+     if (!p) cf_error("%s is not a protocol", $1->name);
+     $$ = proto_find_channel_by_name(p, $3);
+     if (!$$) cf_error("Channel %s.%s not found", $1->name, $3);
+   }
+ ;
+
 CF_CLI_HELP(SHOW SYMBOLS, ..., [[Show all known symbolic names]])
 CF_CLI(SHOW SYMBOLS, sym_args, [table|filter|function|protocol|template|<symbol>], [[Show all known symbolic names]])
 { cmd_show_symbols($3); } ;
@@ -731,7 +869,7 @@ sym_args:
 
 CF_CLI_HELP(DUMP, ..., [[Dump debugging information]])
 CF_CLI(DUMP RESOURCES,,, [[Dump all allocated resource]])
-{ rdump(&root_pool); cli_msg(0, ""); } ;
+{ rdump(&root_pool, 0); cli_msg(0, ""); } ;
 CF_CLI(DUMP SOCKETS,,, [[Dump open sockets]])
 { sk_dump_all(); cli_msg(0, ""); } ;
 CF_CLI(DUMP EVENTS,,, [[Dump event log]])
@@ -741,16 +879,18 @@ CF_CLI(DUMP INTERFACES,,, [[Dump interface information]])
 CF_CLI(DUMP NEIGHBORS,,, [[Dump neighbor cache]])
 { neigh_dump_all(); cli_msg(0, ""); } ;
 CF_CLI(DUMP ATTRIBUTES,,, [[Dump attribute cache]])
-{ rta_dump_all(); cli_msg(0, ""); } ;
-CF_CLI(DUMP ROUTES,,, [[Dump routing table]])
+{ ea_dump_all(); cli_msg(0, ""); } ;
+CF_CLI(DUMP ROUTES,,, [[Dump routes]])
 { rt_dump_all(); cli_msg(0, ""); } ;
+CF_CLI(DUMP TABLES,,, [[Dump table connections]])
+{ rt_dump_hooks_all(); cli_msg(0, ""); } ;
 CF_CLI(DUMP PROTOCOLS,,, [[Dump protocol information]])
 { protos_dump_all(); cli_msg(0, ""); } ;
 CF_CLI(DUMP FILTER ALL,,, [[Dump all filters in linearized form]])
 { filters_dump_all(); cli_msg(0, ""); } ;
 
 CF_CLI(EVAL, term, <expr>, [[Evaluate an expression]])
-{ cmd_eval(f_linearize($2)); } ;
+{ cmd_eval(f_linearize($2, 1)); } ;
 
 CF_CLI_HELP(ECHO, ..., [[Control echoing of log messages]])
 CF_CLI(ECHO, echo_mask echo_size, (all | off | { debug|trace|info|remote|warning|error|auth [, ...] }) [<buffer-size>], [[Control echoing of log messages]]) {
@@ -786,8 +926,13 @@ CF_CLI(RELOAD OUT, proto_patt, <protocol> | \"<pattern>\" | all, [[Reload protoc
 { proto_apply_cmd($3, proto_cmd_reload, 1, CMD_RELOAD_OUT); } ;
 
 CF_CLI_HELP(DEBUG, ..., [[Control protocol debugging via BIRD logs]])
-CF_CLI(DEBUG, proto_patt debug_mask, (<protocol> | \"<pattern>\" | all) (all | off | { states|routes|filters|interfaces|events|packets [, ...] }), [[Control protocol debugging via BIRD logs]])
-{ proto_apply_cmd($2, proto_cmd_debug, 1, $3); } ;
+CF_CLI(DEBUG, debug_args, (<protocol> | <channel> | \"<pattern>\" | all) (all | off | { states|routes|filters|interfaces|events|packets [, ...] }), [[Control protocol debugging via BIRD logs]])
+{ /* Done in debug_args */  };
+
+debug_args:
+   proto_patt debug_mask { proto_apply_cmd($1, proto_cmd_debug, 1, $2);  }
+ | channel_arg debug_mask { channel_cmd_debug($1, $2); }
+ ;
 
 CF_CLI_HELP(MRTDUMP, ..., [[Control protocol debugging via MRTdump files]])
 CF_CLI(MRTDUMP, proto_patt mrtdump_mask, (<protocol> | \"<pattern>\" | all) (all | off | { states|messages [, ...] }), [[Control protocol debugging via MRTdump format]])
@@ -807,9 +952,6 @@ proto_patt2:
  |      { $$.ptr = NULL; $$.patt = 1; }
  | TEXT { $$.ptr = $1; $$.patt = 1; }
  ;
-
-dynamic_attr: IGP_METRIC { $$ = f_new_dynamic_attr(EAF_TYPE_INT, T_INT, EA_GEN_IGP_METRIC); } ;
-
 
 CF_CODE
 

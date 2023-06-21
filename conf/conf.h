@@ -16,7 +16,6 @@
 #include "lib/timer.h"
 
 /* Configuration structure */
-
 struct config {
   pool *pool;				/* Pool the configuration is stored in */
   linpool *mem;				/* Linear pool containing configuration data */
@@ -28,20 +27,24 @@ struct config {
 
   int mrtdump_file;			/* Configured MRTDump file (sysdep, fd in unix) */
   const char *syslog_name;		/* Name used for syslog (NULL -> no syslog) */
-  struct rtable_config *def_tables[NET_MAX]; /* Default routing tables for each network */
+  struct symbol *def_tables[NET_MAX];	/* Default routing tables for each network */
   struct iface_patt *router_id_from;	/* Configured list of router ID iface patterns */
 
   u32 router_id;			/* Our Router ID */
-  unsigned proto_default_debug;		/* Default protocol debug mask */
-  unsigned proto_default_mrtdump;	/* Default protocol mrtdump mask */
+  u32 proto_default_debug;		/* Default protocol debug mask */
+  u32 proto_default_mrtdump;		/* Default protocol mrtdump mask */
+  u32 channel_default_debug;		/* Default channel debug mask */
+  u16 filter_vstk, filter_estk;		/* Filter stack depth */
   struct timeformat tf_route;		/* Time format for 'show route' */
   struct timeformat tf_proto;		/* Time format for 'show protocol' */
   struct timeformat tf_log;		/* Time format for the logfile */
   struct timeformat tf_base;		/* Time format for other purposes */
   u32 gr_wait;				/* Graceful restart wait timeout (sec) */
+  const char *hostname;			/* Hostname */
 
   int cli_debug;			/* Tracing of CLI connections and commands */
   int latency_debug;			/* I/O loop tracks duration of each event */
+  int table_debug;			/* Track route propagation through tables */
   u32 latency_limit;			/* Events with longer duration are logged (us) */
   u32 watchdog_warning;			/* I/O loop watchdog limit for warning (us) */
   u32 watchdog_timeout;			/* Watchdog timeout (in seconds, 0 = disabled) */
@@ -51,8 +54,8 @@ struct config {
   char *err_file_name;			/* File name containing error */
   char *file_name;			/* Name of main configuration file */
   int file_fd;				/* File descriptor of main configuration file */
-  HASH(struct symbol) sym_hash;		/* Lexer: symbol hash table */
-  struct config *fallback;		/* Link to regular config for CLI parsing */
+  int thread_count;			/* How many worker threads to prefork */
+
   struct sym_scope *root_scope;		/* Scope for root symbols */
   int obstacle_count;			/* Number of items blocking freeing of this config */
   int shutdown;				/* This is a pseudo-config for daemon shutdown */
@@ -68,6 +71,7 @@ struct config *config_alloc(const char *name);
 int config_parse(struct config *);
 int cli_parse(struct config *);
 void config_free(struct config *);
+void config_free_old(void);
 int config_commit(struct config *, int type, uint timeout);
 int config_confirm(void);
 int config_undo(void);
@@ -94,7 +98,7 @@ void order_shutdown(int gr);
 
 
 /* Pools */
-
+extern pool *config_pool;
 extern linpool *cfg_mem;
 
 #define cfg_alloc(size) lp_alloc(cfg_mem, size)
@@ -119,7 +123,7 @@ struct symbol {
     const struct f_line *function;	/* For SYM_FUNCTION */
     const struct filter *filter;	/* For SYM_FILTER */
     struct rtable_config *table;	/* For SYM_TABLE */
-    struct f_dynamic_attr *attribute;	/* For SYM_ATTRIBUTE */
+    struct ea_class *attribute;		/* For SYM_ATTRIBUTE */
     struct f_val *val;			/* For SYM_CONSTANT */
     uint offset;			/* For SYM_VARIABLE */
   };
@@ -130,8 +134,20 @@ struct symbol {
 struct sym_scope {
   struct sym_scope *next;		/* Next on scope stack */
   struct symbol *name;			/* Name of this scope */
+
+  HASH(struct symbol) hash;		/* Local symbol hash */
+
   uint slots;				/* Variable slots */
-  int active;				/* Currently entered */
+  byte active;				/* Currently entered */
+  byte block;				/* No independent stack frame */
+  byte soft_scopes;			/* Number of soft scopes above */
+};
+
+extern struct sym_scope *global_root_scope;
+
+struct bytestring {
+  size_t length;
+  byte data[];
 };
 
 #define SYM_MAX_LEN 64
@@ -177,11 +193,21 @@ int cf_lex(void);
 void cf_lex_init(int is_cli, struct config *c);
 void cf_lex_unwind(void);
 
-struct symbol *cf_find_symbol(const struct config *cfg, const byte *c);
+struct symbol *cf_find_symbol_scope(const struct sym_scope *scope, const byte *c);
+static inline struct symbol *cf_find_symbol_cfg(const struct config *cfg, const byte *c)
+{ return cf_find_symbol_scope(cfg->root_scope, c); }
+
+#define cf_find_symbol(where, what) _Generic(*(where), \
+    struct config: cf_find_symbol_cfg, \
+    struct sym_scope: cf_find_symbol_scope \
+    )((where), (what))
 
 struct symbol *cf_get_symbol(const byte *c);
 struct symbol *cf_default_name(char *template, int *counter);
 struct symbol *cf_localize_symbol(struct symbol *sym);
+
+static inline int cf_symbol_is_local(struct symbol *sym)
+{ return (sym->scope == conf_this_scope) && !conf_this_scope->soft_scopes; }
 
 /**
  * cf_define_symbol - define meaning of a symbol
@@ -206,6 +232,15 @@ struct symbol *cf_localize_symbol(struct symbol *sym);
 
 void cf_push_scope(struct symbol *);
 void cf_pop_scope(void);
+void cf_push_soft_scope(void);
+void cf_pop_soft_scope(void);
+
+static inline void cf_push_block_scope(void)
+{ cf_push_scope(NULL); conf_this_scope->block = 1; }
+
+static inline void cf_pop_block_scope(void)
+{ ASSERT(conf_this_scope->block); cf_pop_scope(); }
+
 char *cf_symbol_class_name(struct symbol *sym);
 
 /* Parser */

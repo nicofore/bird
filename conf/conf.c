@@ -46,7 +46,7 @@
 #undef LOCAL_DEBUG
 
 #include "nest/bird.h"
-#include "nest/route.h"
+#include "nest/rt.h"
 #include "nest/protocol.h"
 #include "nest/iface.h"
 #include "lib/resource.h"
@@ -55,11 +55,13 @@
 #include "lib/timer.h"
 #include "conf/conf.h"
 #include "filter/filter.h"
+#include "sysdep/unix/unix.h"
 
 
 static jmp_buf conf_jmpbuf;
 
 struct config *config, *new_config;
+pool *config_pool;
 
 static struct config *old_config;	/* Old configuration */
 static struct config *future_config;	/* New config held here if recon requested during recon */
@@ -88,7 +90,7 @@ int undo_available;			/* Undo was not requested from last reconfiguration */
 struct config *
 config_alloc(const char *name)
 {
-  pool *p = rp_new(&root_pool, "Config");
+  pool *p = rp_new(config_pool, the_bird_domain.the_bird, "Config");
   linpool *l = lp_new_default(p);
   struct config *c = lp_allocz(l, sizeof(struct config));
 
@@ -139,6 +141,7 @@ config_parse(struct config *c)
   protos_preconfig(c);
   rt_preconfig(c);
   cf_parse();
+  rt_postconfig(c);
 
   if (EMPTY_LIST(c->protos))
     cf_error("No protocol is specified in the config file");
@@ -167,7 +170,6 @@ int
 cli_parse(struct config *c)
 {
   int done = 0;
-  c->fallback = config;
   new_config = c;
   cfg_mem = c->mem;
   if (setjmp(conf_jmpbuf))
@@ -178,7 +180,6 @@ cli_parse(struct config *c)
   done = 1;
 
 cleanup:
-  c->fallback = NULL;
   new_config = NULL;
   cfg_mem = NULL;
   return done;
@@ -194,8 +195,33 @@ cleanup:
 void
 config_free(struct config *c)
 {
-  if (c)
-    rfree(c->pool);
+  if (!c)
+    return;
+
+  ASSERT(!c->obstacle_count);
+
+  rp_free(c->pool);
+}
+
+/**
+ * config_free_old - free stored old configuration
+ *
+ * This function frees the old configuration (%old_config) that is saved for the
+ * purpose of undo. It is useful before parsing a new config when reconfig is
+ * requested, to avoid keeping three (perhaps memory-heavy) configs together.
+ * Configuration is not freed when it is still active during reconfiguration.
+ */
+void
+config_free_old(void)
+{
+  if (!old_config || old_config->obstacle_count)
+    return;
+
+  tm_stop(config_timer);
+  undo_available = 0;
+
+  config_free(old_config);
+  old_config = NULL;
 }
 
 void
@@ -217,6 +243,14 @@ config_del_obstacle(struct config *c)
 static int
 global_commit(struct config *new, struct config *old)
 {
+  if (!new->hostname)
+    {
+      new->hostname = get_hostname(new->mem);
+
+      if (!new->hostname)
+        log(L_WARN "Cannot determine hostname");
+    }
+
   if (!old)
     return 0;
 
@@ -481,10 +515,12 @@ config_timeout(timer *t UNUSED)
 void
 config_init(void)
 {
-  config_event = ev_new(&root_pool);
+  config_pool = rp_new(&root_pool, the_bird_domain.the_bird, "Configurations");
+
+  config_event = ev_new(config_pool);
   config_event->hook = config_done;
 
-  config_timer = tm_new(&root_pool);
+  config_timer = tm_new(config_pool);
   config_timer->hook = config_timeout;
 }
 
@@ -511,6 +547,8 @@ order_shutdown(int gr)
   memcpy(c, config, sizeof(struct config));
   init_list(&c->protos);
   init_list(&c->tables);
+  init_list(&c->symbols);
+  memset(c->def_tables, 0, sizeof(c->def_tables));
   c->shutdown = 1;
   c->gr_down = gr;
 
@@ -573,6 +611,7 @@ cfg_copy_list(list *dest, list *src, unsigned node_size)
   {
     dn = cfg_alloc(node_size);
     memcpy(dn, sn, node_size);
+    memset(dn, 0, sizeof(node));
     add_tail(dest, dn);
   }
 }

@@ -13,16 +13,16 @@
 #include "nest/cli.h"
 #include "nest/iface.h"
 #include "nest/protocol.h"
-#include "nest/route.h"
+#include "nest/rt.h"
 #include "nest/password.h"
 #include "conf/conf.h"
 #include "lib/hash.h"
+#include "lib/io-loop.h"
 #include "lib/resource.h"
 #include "lib/socket.h"
 #include "lib/string.h"
 
 #include "nest/bfd.h"
-#include "io.h"
 
 
 #define BFD_CONTROL_PORT	3784
@@ -47,6 +47,7 @@ struct bfd_config
   u8 accept_ipv6;
   u8 accept_direct;
   u8 accept_multihop;
+  u8 strict_bind;
 };
 
 struct bfd_iface_config
@@ -59,6 +60,15 @@ struct bfd_iface_config
   u8 passive;
   u8 auth_type;				/* Authentication type (BFD_AUTH_*) */
   list *passwords;			/* Passwords for authentication */
+};
+
+struct bfd_session_config
+{
+  u32 min_rx_int;
+  u32 min_tx_int;
+  u32 idle_tx_int;
+  u8 multiplier;
+  u8 passive;
 };
 
 struct bfd_neighbor
@@ -78,17 +88,18 @@ struct bfd_neighbor
 struct bfd_proto
 {
   struct proto p;
-  struct birdloop *loop;
-  pool *tpool;
+
   pthread_spinlock_t lock;
+
+  pool *tpool;
+
   node bfd_node;
 
   slab *session_slab;
   HASH(struct bfd_session) session_hash_id;
   HASH(struct bfd_session) session_hash_ip;
 
-  sock *notify_rs;
-  sock *notify_ws;
+  event notify_event;
   list notify_list;
 
   sock *rx4_1;
@@ -107,6 +118,7 @@ struct bfd_iface
   struct bfd_proto *bfd;
 
   sock *sk;
+  sock *rx;
   u32 uc;
   u8 changed;
 };
@@ -130,6 +142,9 @@ struct bfd_session
   u8 rem_diag;
   u32 loc_id;				/* Local session ID (local discriminator) */
   u32 rem_id;				/* Remote session ID (remote discriminator) */
+
+  struct bfd_session_config cf;		/* Static configuration parameters */
+
   u32 des_min_tx_int;			/* Desired min rx interval, local option */
   u32 des_min_tx_new;			/* Used for des_min_tx_int change */
   u32 req_min_rx_int;			/* Required min tx interval, local option */
@@ -141,6 +156,7 @@ struct bfd_session
   u8 detect_mult;			/* Announced detect_mult, local option */
   u8 rem_detect_mult;			/* Last received detect_mult */
 
+  uint ifindex;				/* Iface index, for hashing in bfd.session_hash_ip */
   btime last_tx;			/* Time of last sent periodic control packet */
   btime last_rx;			/* Time of last received valid control packet */
 
@@ -149,7 +165,6 @@ struct bfd_session
 
   list request_list;			/* List of client requests (struct bfd_request) */
   btime last_state_change;		/* Time of last state change */
-  u8 notify_running;			/* 1 if notify hooks are running */
 
   u8 rx_csn_known;			/* Received crypto sequence number is known */
   u32 rx_csn;				/* Last received crypto sequence number */
@@ -201,13 +216,14 @@ static inline void bfd_unlock_sessions(struct bfd_proto *p) { pthread_spin_unloc
 
 /* bfd.c */
 struct bfd_session * bfd_find_session_by_id(struct bfd_proto *p, u32 id);
-struct bfd_session * bfd_find_session_by_addr(struct bfd_proto *p, ip_addr addr);
+struct bfd_session * bfd_find_session_by_addr(struct bfd_proto *p, ip_addr addr, uint ifindex);
 void bfd_session_process_ctl(struct bfd_session *s, u8 flags, u32 old_tx_int, u32 old_rx_int);
 void bfd_show_sessions(struct proto *P);
 
 /* packets.c */
 void bfd_send_ctl(struct bfd_proto *p, struct bfd_session *s, int final);
 sock * bfd_open_rx_sk(struct bfd_proto *p, int multihop, int inet_version);
+sock * bfd_open_rx_sk_bound(struct bfd_proto *p, ip_addr local, struct iface *ifa);
 sock * bfd_open_tx_sk(struct bfd_proto *p, ip_addr local, struct iface *ifa);
 
 

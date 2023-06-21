@@ -22,7 +22,7 @@
 #include "lib/resource.h"
 #include "nest/protocol.h"
 #include "nest/iface.h"
-#include "nest/route.h"
+#include "nest/rt.h"
 #include "nest/cli.h"
 #include "nest/locks.h"
 #include "nest/bfd.h"
@@ -939,11 +939,14 @@ struct lsadb_show_data {
   u32 router;		/* Advertising router, 0 -> all */
 };
 
+extern struct ea_class ea_ospf_metric1, ea_ospf_metric2, ea_ospf_tag, ea_ospf_router_id;
 
-#define EA_OSPF_METRIC1	EA_CODE(PROTOCOL_OSPF, 0)
-#define EA_OSPF_METRIC2	EA_CODE(PROTOCOL_OSPF, 1)
-#define EA_OSPF_TAG	EA_CODE(PROTOCOL_OSPF, 2)
-#define EA_OSPF_ROUTER_ID EA_CODE(PROTOCOL_OSPF, 3)
+/*
+ * For regular networks, neighbor address must match network prefix.
+ * For unnumbered networks, we consider every address local.
+ */
+static inline int ospf_ipa_local(ip_addr a, const struct ifa *addr)
+{ return ipa_in_netX(a, &addr->prefix) || (addr->flags & IA_HOST); }
 
 
 /* ospf.c */
@@ -998,6 +1001,8 @@ void ospf_sh_iface(struct proto *P, const char *iff);
 void ospf_sh_state(struct proto *P, int verbose, int reachable);
 
 void ospf_sh_lsadb(struct lsadb_show_data *ld);
+
+extern struct rte_owner_class ospf_rte_owner_class;
 
 /* iface.c */
 void ospf_iface_chstate(struct ospf_iface *ifa, u8 state);
@@ -1056,22 +1061,16 @@ int ospf_rx_hook(sock * sk, uint size);
 void ospf_err_hook(sock * sk, int err);
 void ospf_verr_hook(sock *sk, int err);
 void ospf_send_to(struct ospf_iface *ifa, ip_addr ip);
-void ospf_send_to_agt(struct ospf_iface *ifa, u8 state);
-void ospf_send_to_bdr(struct ospf_iface *ifa);
+void ospf_send_to_iface(struct ospf_iface *ifa);
 
-static inline uint ospf_pkt_maxsize(struct ospf_iface *ifa)
-{ return ifa->tx_length - ifa->tx_hdrlen; }
+static inline void ospf_send_to_nbr(struct ospf_iface *ifa, struct ospf_neighbor *n)
+{ ospf_send_to(ifa, (ifa->type == OSPF_IT_PTP) ? ifa->all_routers :  n->ip); }
 
 static inline void ospf_send_to_all(struct ospf_iface *ifa)
 { ospf_send_to(ifa, ifa->all_routers); }
 
-static inline void ospf_send_to_des(struct ospf_iface *ifa)
-{
-  if (ipa_nonzero(ifa->des_routers))
-    ospf_send_to(ifa, ifa->des_routers);
-  else
-    ospf_send_to_bdr(ifa);
-}
+static inline uint ospf_pkt_maxsize(struct ospf_iface *ifa)
+{ return ifa->tx_length - ifa->tx_hdrlen; }
 
 #ifndef PARSER
 #define DROP(DSC,VAL) do { err_dsc = DSC; err_val = VAL; goto drop; } while(0)

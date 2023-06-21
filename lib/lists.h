@@ -42,6 +42,7 @@ typedef union list {			/* In fact two overlayed nodes */
   };
 } list;
 
+#define STATIC_LIST_INIT(name)	name = { .head = &name.tail_node, .tail = &name.head_node, .null = NULL }
 
 #define NODE (node *)
 #define HEAD(list) ((void *)((list).head))
@@ -59,6 +60,8 @@ typedef union list {			/* In fact two overlayed nodes */
 /* WALK_LIST_FIRST supposes that called code removes each processed node */
 #define WALK_LIST_FIRST(n,list) \
      while(n=HEAD(list), (NODE (n))->next)
+#define WALK_LIST_FIRST2(n,pos,list) \
+     while(n=SKIP_BACK(typeof(*n),pos,HEAD(list)), (n)->pos.next)
 #define WALK_LIST_BACKWARDS(n,list) for(n=TAIL(list);(NODE (n))->prev; \
 				n=(void *)((NODE (n))->prev))
 #define WALK_LIST_BACKWARDS_DELSAFE(n,prv,list) \
@@ -66,6 +69,18 @@ typedef union list {			/* In fact two overlayed nodes */
 
 #define EMPTY_LIST(list) (!(list).head->next)
 
+static inline _Bool
+enlisted(node *n)
+{
+  switch ((!!n->next) + (!!n->prev))
+  {
+    case 0: return 0;
+    case 2: return 1;
+    case 1: bug("Garbled event list node");
+  }
+
+  bug("Maths is broken. And you should see a new heaven and a new earth: for the first heaven and the first earth had been passed away.");
+}
 
 #ifndef _BIRD_LISTS_C_
 #define LIST_INLINE static inline
