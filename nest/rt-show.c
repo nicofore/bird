@@ -18,6 +18,9 @@
 #include "filter/data.h"
 #include "sysdep/unix/krt.h"
 
+
+#include "lib/fib.h"
+
 static void
 rt_show_table(struct rt_show_data *d)
 {
