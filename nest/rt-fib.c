@@ -192,7 +192,7 @@ u32 getHash(struct fib *f, atomic_uintptr_t *ptr)
 	if (atomic_load(&(node->sentinel)) & 1)
 		return getHashFromSentinel(f, ptr);
 	else
-		return reverseBits(net_hash(&(node->addr[0])));
+		return net_hash(&(node->addr[0]));
 }
 
 static uintptr_t getAddress(atomic_uintptr_t *ptr)
@@ -788,7 +788,7 @@ fib_get2(struct fib *f, const net_addr *a, int row)
 			if (atomic_compare_exchange_strong(&(((struct fib_node *)atomic_load(curr))->next), &expected, (atomic_uintptr_t)new_node))
 			{
 				if (f->init)
-					f->init(new_node);
+					f->init(fib_node_to_user(f, new_node));
 				addALink((atomic_uintptr_t *)&new_node);
 				atomic_fetch_add(&(f->entries), 1);
 				atomic_store(curr, 0);

@@ -16,6 +16,11 @@
 #include "lib/string.h"
 #include "lib/rcu.h"
 
+#include <pthread.h>
+
+pthread_mutex_t* mures = NULL;
+pthread_mutexattr_t attr3;
+
 /**
  * DOC: Resource pools
  *
@@ -49,7 +54,17 @@ pool root_pool;
 static void
 rp_init(pool *z, struct domain_generic *dom, const char *name)
 {
-  ASSERT_DIE(DG_IS_LOCKED(dom));
+  if (!mures){
+    mures = malloc(sizeof(pthread_mutex_t));
+    pthread_mutexattr_init(&attr3);
+    pthread_mutexattr_settype(&attr3, PTHREAD_MUTEX_RECURSIVE);
+    pthread_mutex_init(mures, &attr3);
+  }
+    
+
+  //ASSERT_DIE(DG_IS_LOCKED(dom));
+  pthread_mutex_lock(mures);
+
 
   if (name && !domain_name(dom))
     domain_setup(dom, name, z);
@@ -57,6 +72,8 @@ rp_init(pool *z, struct domain_generic *dom, const char *name)
   z->name = name;
   z->domain = dom;
   z->inside = (TLIST_LIST(resource)) {};
+
+  pthread_mutex_unlock(mures);
 }
 
 /**
@@ -117,8 +134,10 @@ rp_newf(pool *p, struct domain_generic *dom, const char *fmt, ...)
 
 void rp_free(pool *p)
 {
-  ASSERT_DIE(DG_IS_LOCKED(p->domain));
+  //ASSERT_DIE(DG_IS_LOCKED(p->domain));
+  pthread_mutex_lock(mures);
   rfree(p);
+  pthread_mutex_unlock(mures);
 }
 
 static void
@@ -199,14 +218,16 @@ pool_lookup(resource *P, unsigned long a)
 
 void rmove(void *res, pool *p)
 {
+  pthread_mutex_lock(mures);
   resource *r = res;
   pool *orig = resource_parent(r);
 
-  ASSERT_DIE(DG_IS_LOCKED(orig->domain));
-  ASSERT_DIE(DG_IS_LOCKED(p->domain));
+  //ASSERT_DIE(DG_IS_LOCKED(orig->domain));
+  //ASSERT_DIE(DG_IS_LOCKED(p->domain));
 
   resource_rem_node(&orig->inside, r);
   resource_add_tail(&p->inside, r);
+  pthread_mutex_unlock(mures);
 }
 
 /**
@@ -222,18 +243,22 @@ void rmove(void *res, pool *p)
 void
 rfree(void *res)
 {
+  pthread_mutex_lock(mures);
   resource *r = res;
 
-  if (!r)
+  if (!r){
+    pthread_mutex_unlock(mures);
     return;
+  }
 
   pool *orig = resource_parent(r);
-  ASSERT_DIE(DG_IS_LOCKED(orig->domain));
+  //ASSERT_DIE(DG_IS_LOCKED(orig->domain));
   resource_rem_node(&orig->inside, r);
 
   r->class->free(r);
   r->class = NULL;
   xfree(r);
+  pthread_mutex_unlock(mures);
 }
 
 /**
@@ -289,13 +314,15 @@ rmemsize(void *res)
 void *
 ralloc(pool *p, struct resclass *c)
 {
-  ASSERT_DIE(DG_IS_LOCKED(p->domain));
+  pthread_mutex_lock(mures);
+  //ASSERT_DIE(DG_IS_LOCKED(p->domain));
 
   resource *r = xmalloc(c->size);
   bzero(r, c->size);
 
   r->class = c;
   resource_add_tail(&p->inside, r);
+  pthread_mutex_unlock(mures);
 
   return r;
 }
@@ -354,11 +381,13 @@ tmp_init(pool *p, struct domain_generic *dom)
 void
 tmp_flush(void)
 {
-  ASSERT_DIE(DG_IS_LOCKED(tmp_res.domain));
+  pthread_mutex_lock(mures);
+  //ASSERT_DIE(DG_IS_LOCKED(tmp_res.domain));
 
   lp_flush(tmp_linpool);
   rp_free(tmp_res.pool);
   tmp_res.pool = rp_new(tmp_res.parent, tmp_res.domain, "TMP");
+  pthread_mutex_unlock(mures);
 }
 
 
@@ -438,7 +467,8 @@ static struct resclass mb_class = {
 void *
 mb_alloc(pool *p, unsigned size)
 {
-  ASSERT_DIE(DG_IS_LOCKED(p->domain));
+  pthread_mutex_lock(mures);
+  //ASSERT_DIE(DG_IS_LOCKED(p->domain));
 
   struct mblock *b = xmalloc(sizeof(struct mblock) + size);
 
@@ -446,6 +476,7 @@ mb_alloc(pool *p, unsigned size)
   b->r.n = (struct resource_node) {};
   resource_add_tail(&p->inside, &b->r);
   b->size = size;
+  pthread_mutex_unlock(mures);
   return b->data;
 }
 
@@ -488,15 +519,17 @@ mb_allocz(pool *p, unsigned size)
 void *
 mb_realloc(void *m, unsigned size)
 {
+  pthread_mutex_lock(mures);
   struct mblock *b = SKIP_BACK(struct mblock, data, m);
   struct pool *p = resource_parent(&b->r);
 
-  ASSERT_DIE(DG_IS_LOCKED(p->domain));
+  //ASSERT_DIE(DG_IS_LOCKED(p->domain));
 
   b = xrealloc(b, sizeof(struct mblock) + size);
   b->size = size;
 
   resource_update_node(&p->inside, &b->r);
+  pthread_mutex_unlock(mures);
   return b->data;
 }
 
