@@ -22,7 +22,6 @@
 #include "lib/io-loop.h"
 #include "lib/settle.h"
 
-#include <pthread.h>
 #include <stdatomic.h>
 
 struct ea_list;
@@ -225,7 +224,6 @@ static inline int rt_cork_check(event *e)
 typedef struct network {
   struct rte_storage *routes;		/* Available routes for this network */
   struct rt_pending_export *first, *last;
-  pthread_mutex_t mutex;    
   struct fib_node n;			/* FIB flags reserved for kernel syncer */
 } net;
 

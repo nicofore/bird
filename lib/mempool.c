@@ -20,35 +20,26 @@
 
 #include <stdlib.h>
 #include <stdint.h>
-#include <stdio.h>
 
 #include "nest/bird.h"
 #include "lib/resource.h"
 #include "lib/string.h"
 
-#include <pthread.h>
-
-pthread_mutex_t* mumem = NULL;
-pthread_mutexattr_t attr5;
-
-
-struct lp_chunk
-{
+struct lp_chunk {
   struct lp_chunk *next;
   struct linpool *lp;
   uintptr_t data_align[0];
   byte data[0];
 };
 
-#define LP_DATA_SIZE (page_size - OFFSETOF(struct lp_chunk, data))
+#define LP_DATA_SIZE	(page_size - OFFSETOF(struct lp_chunk, data))
 
-struct linpool
-{
+struct linpool {
   resource r;
   byte *ptr, *end;
-  struct lp_chunk *first, *current; /* Normal (reusable) chunks */
-  struct lp_chunk *first_large;     /* Large chunks */
-  struct lp_state *initial;         /* Initial state to restore to */
+  struct lp_chunk *first, *current;		/* Normal (reusable) chunks */
+  struct lp_chunk *first_large;			/* Large chunks */
+  struct lp_state *initial;			/* Initial state to restore to */
   uint total, total_large;
 };
 
@@ -58,12 +49,13 @@ static resource *lp_lookup(resource *, unsigned long);
 static struct resmem lp_memsize(resource *r);
 
 static struct resclass lp_class = {
-    "LinPool",
-    sizeof(struct linpool),
-    lp_free,
-    lp_dump,
-    lp_lookup,
-    lp_memsize};
+  "LinPool",
+  sizeof(struct linpool),
+  lp_free,
+  lp_dump,
+  lp_lookup,
+  lp_memsize
+};
 
 /**
  * lp_new - create a new linear memory pool
@@ -72,15 +64,9 @@ static struct resclass lp_class = {
  * lp_new() creates a new linear memory pool resource inside the pool @p.
  * The linear pool consists of a list of memory chunks of page size.
  */
-linpool *lp_new(pool *p)
+linpool
+*lp_new(pool *p)
 {
-  if (mumem == NULL)
-  {
-    pthread_mutexattr_init(&attr5);
-    pthread_mutexattr_settype(&attr5, PTHREAD_MUTEX_RECURSIVE);
-    mumem = malloc(sizeof(pthread_mutex_t));
-    pthread_mutex_init(mumem, &attr5);
-  }
   linpool *m = ralloc(p, &lp_class);
   m->initial = lp_save(m);
   return m;
@@ -103,59 +89,52 @@ linpool *lp_new(pool *p)
 void *
 lp_alloc(linpool *m, uint size)
 {
-  // ASSERT_DIE(DG_IS_LOCKED(resource_parent(&m->r)->domain));
-  pthread_mutex_lock(mumem);
-  byte *a = (byte *)BIRD_ALIGN((unsigned long)m->ptr, CPU_STRUCT_ALIGN);
+  ASSERT_DIE(DG_IS_LOCKED(resource_parent(&m->r)->domain));
+  byte *a = (byte *) BIRD_ALIGN((unsigned long) m->ptr, CPU_STRUCT_ALIGN);
   byte *e = a + size;
 
   if (e <= m->end)
-  {
-    m->ptr = e;
-    pthread_mutex_unlock(mumem);
-    return a;
-  }
+    {
+      m->ptr = e;
+      return a;
+    }
   else
-  {
-    struct lp_chunk *c;
-    if (size > LP_DATA_SIZE)
     {
-      /* Too large => allocate large chunk */
-      c = xmalloc(sizeof(struct lp_chunk) + size);
-      c->lp = m;
-      c->next = m->first_large;
+      struct lp_chunk *c;
+      if (size > LP_DATA_SIZE)
+	{
+	  /* Too large => allocate large chunk */
+	  c = xmalloc(sizeof(struct lp_chunk) + size);
+	  c->lp = m;
+	  c->next = m->first_large;
 
-      m->total_large += size;
-      m->first_large = c;
-    }
-    else
-    {
-      if (m->current)
-        ASSERT_DIE(!m->current->next);
-
-      /* Need to allocate a new chunk */
-      c = alloc_page();
-
-      m->total += LP_DATA_SIZE;
-      c->next = NULL;
-      c->lp = m;
-
-      if (m->current)
-        m->current->next = c;
+	  m->total_large += size;
+	  m->first_large = c;
+	}
       else
-        m->first = c;
+	{
+	  if (m->current)
+	    ASSERT_DIE(!m->current->next);
 
-      m->current = c;
-      m->ptr = c->data + size;
-      m->end = c->data + LP_DATA_SIZE;
+	  /* Need to allocate a new chunk */
+	  c = alloc_page();
+
+	  m->total += LP_DATA_SIZE;
+	  c->next = NULL;
+	  c->lp = m;
+
+	  if (m->current)
+	    m->current->next = c;
+	  else
+	    m->first = c;
+
+	  m->current = c;
+	  m->ptr = c->data + size;
+	  m->end = c->data + LP_DATA_SIZE;
+	}
+      return c->data;
     }
-    pthread_mutex_unlock(mumem);
-    return c->data;
-  }
 }
-
-
-
-
 
 /**
  * lp_allocu - allocate unaligned memory from a &linpool
@@ -170,17 +149,15 @@ lp_alloc(linpool *m, uint size)
 void *
 lp_allocu(linpool *m, uint size)
 {
-  // ASSERT_DIE(DG_IS_LOCKED(resource_parent(&m->r)->domain));
-  pthread_mutex_lock(mumem);
+  ASSERT_DIE(DG_IS_LOCKED(resource_parent(&m->r)->domain));
   byte *a = m->ptr;
   byte *e = a + size;
 
   if (e <= m->end)
-  {
-    m->ptr = e;
-    pthread_mutex_unlock(mumem);
-    return a;
-  }
+    {
+      m->ptr = e;
+      return a;
+    }
   return lp_alloc(m, size);
 }
 
@@ -208,7 +185,8 @@ lp_allocz(linpool *m, uint size)
  * This function frees the whole contents of the given &linpool @m,
  * but leaves the pool itself.
  */
-void lp_flush(linpool *m)
+void
+lp_flush(linpool *m)
 {
   lp_restore(m, m->initial);
   m->initial = lp_save(m);
@@ -225,16 +203,15 @@ void lp_flush(linpool *m)
 struct lp_state *
 lp_save(linpool *m)
 {
-  // ASSERT_DIE(DG_IS_LOCKED(resource_parent(&m->r)->domain));
-  pthread_mutex_lock(mumem);
+  ASSERT_DIE(DG_IS_LOCKED(resource_parent(&m->r)->domain));
   struct lp_state *p = lp_alloc(m, sizeof(struct lp_state));
   ASSERT_DIE(m->current);
-  *p = (struct lp_state){
-      .current = m->current,
-      .large = m->first_large,
-      .total_large = m->total_large,
+  *p = (struct lp_state) {
+    .current = m->current,
+    .large = m->first_large,
+    .total_large = m->total_large,
   };
-  pthread_mutex_unlock(mumem);
+
   return p;
 }
 
@@ -248,85 +225,84 @@ lp_save(linpool *m)
  * the memory, therefore the function also invalidates other states that were
  * saved between (on the same pool).
  */
-void lp_restore(linpool *m, lp_state *p)
+void
+lp_restore(linpool *m, lp_state *p)
 {
   struct lp_chunk *c;
-  // ASSERT_DIE(DG_IS_LOCKED(resource_parent(&m->r)->domain));
-  pthread_mutex_lock(mumem);
+  ASSERT_DIE(DG_IS_LOCKED(resource_parent(&m->r)->domain));
 
   /* Move ptr to the saved pos and free all newer large chunks */
   ASSERT_DIE(p->current);
   m->current = c = p->current;
-  m->ptr = (byte *)p;
+  m->ptr = (byte *) p;
   m->end = c->data + LP_DATA_SIZE;
   m->total_large = p->total_large;
 
   while ((c = m->first_large) && (c != p->large))
-  {
-    m->first_large = c->next;
-    xfree(c);
-  }
+    {
+      m->first_large = c->next;
+      xfree(c);
+    }
 
   while (c = m->current->next)
-  {
-    m->current->next = c->next;
-    free_page(c);
-  }
-  pthread_mutex_unlock(mumem);
+    {
+      m->current->next = c->next;
+      free_page(c);
+    }
 }
 
 static void
 lp_free(resource *r)
 {
-  linpool *m = (linpool *)r;
+  linpool *m = (linpool *) r;
   struct lp_chunk *c, *d;
 
-  for (d = m->first; d; d = c)
-  {
-    c = d->next;
-    free_page(d);
-  }
-  for (d = m->first_large; d; d = c)
-  {
-    c = d->next;
-    xfree(d);
-  }
+  for(d=m->first; d; d = c)
+    {
+      c = d->next;
+      free_page(d);
+    }
+  for(d=m->first_large; d; d = c)
+    {
+      c = d->next;
+      xfree(d);
+    }
 }
 
 static void
 lp_dump(resource *r, unsigned indent)
 {
-  linpool *m = (linpool *)r;
+  linpool *m = (linpool *) r;
   struct lp_chunk *c;
   int cnt, cntl;
   char x[32];
 
-  for (cnt = 0, c = m->first; c; c = c->next, cnt++)
+  for(cnt=0, c=m->first; c; c=c->next, cnt++)
     ;
-  for (cntl = 0, c = m->first_large; c; c = c->next, cntl++)
+  for(cntl=0, c=m->first_large; c; c=c->next, cntl++)
     ;
   debug("(count=%d+%d total=%d+%d)\n",
-        cnt,
-        cntl,
-        m->total,
-        m->total_large);
+	cnt,
+	cntl,
+	m->total,
+	m->total_large);
 
   bsprintf(x, "%%%dschunk %%p\n", indent + 2);
-  for (c = m->first; c; c = c->next)
+  for (c=m->first; c; c=c->next)
     debug(x, "", c);
 
   bsprintf(x, "%%%dslarge %%p\n", indent + 2);
-  for (c = m->first_large; c; c = c->next)
+  for (c=m->first_large; c; c=c->next)
     debug(x, "", c);
 }
 
 static struct resmem
 lp_memsize(resource *r)
 {
-  linpool *m = (linpool *)r;
+  linpool *m = (linpool *) r;
   struct resmem sz = {
-      .overhead = sizeof(struct linpool) + ALLOC_OVERHEAD,
-      .effective = m->total_large,
+    .overhead = sizeof(struct linpool) + ALLOC_OVERHEAD,
+    .effective = m->total_large,
   };
 
   for (struct lp_chunk *c = m->first_large; c; c = c->next)
@@ -342,14 +318,15 @@ lp_memsize(resource *r)
   return sz;
 }
 
+
 static resource *
 lp_lookup(resource *r, unsigned long a)
 {
-  linpool *m = (linpool *)r;
+  linpool *m = (linpool *) r;
   struct lp_chunk *c;
 
-  for (c = m->first; c; c = c->next)
-    if ((unsigned long)c->data <= a && (unsigned long)c->data + LP_DATA_SIZE > a)
+  for(c=m->first; c; c=c->next)
+    if ((unsigned long) c->data <= a && (unsigned long) c->data + LP_DATA_SIZE > a)
       return r;
   return NULL;
 }

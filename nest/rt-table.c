@@ -110,7 +110,6 @@
 #include "lib/idm.h"
 
 #include "lib/fib.h"
-#include <pthread.h>
 
 
 #ifdef CONFIG_BGP
@@ -1682,7 +1681,6 @@ static inline int rte_is_ok(rte *e) { return e && !rte_is_filtered(e); }
 static int
 rte_recalculate(struct rtable_private *table, struct rt_import_hook *c, net *net, rte *new, struct rte_src *src)
 {
-	pthread_mutex_lock(&net->mutex);
 	struct rt_import_request *req = c->req;
 	struct rt_import_stats *stats = &c->stats;
 	struct rte_storage *old_best_stored = net->routes, *old_stored = NULL;
@@ -1732,7 +1730,6 @@ rte_recalculate(struct rtable_private *table, struct rt_import_hook *c, net *net
 
 			/* We need to free the already stored route here before returning */
 			rte_free(new_stored);
-			pthread_mutex_unlock(&net->mutex);
 			return 0;
 		}
 
@@ -1743,7 +1740,6 @@ rte_recalculate(struct rtable_private *table, struct rt_import_hook *c, net *net
 	if (!old && !new)
 	{
 		stats->withdraws_ignored++;
-		pthread_mutex_unlock(&net->mutex);
 		return 0;
 	}
 
@@ -1882,7 +1878,6 @@ rte_recalculate(struct rtable_private *table, struct rt_import_hook *c, net *net
 	rte_announce(table, net, new_stored, old_stored,
 				 net->routes, old_best_stored);
 
-	pthread_mutex_lock(&net->mutex);
 	return 1;
 }
 
@@ -2017,9 +2012,8 @@ void rte_import(struct rt_import_request *req, const net_addr *n, rte *new, stru
 
 	RT_LOCKED(hook->table, tab)
 	{
-		printf("rte_import\n");
 		/* Recalculate the best route */
-		if (rte_recalculate(hook->table, hook, nn, new, src))
+		if (rte_recalculate(tab, hook, nn, new, src))
 			ev_send(req->list, &hook->announce_event);
 	}
 }
@@ -2871,15 +2865,6 @@ void rt_exporter_init(struct rt_exporter *e)
 static struct idm rtable_idm;
 uint rtable_max_id = 0;
 
-static void
-net_init_entry(void *E)
-{
-  net* e = (net*) E;
-  pthread_mutex_init(&(e->mutex), NULL);
-}
-
-
-
 rtable *
 rt_setup(pool *pp, struct rtable_config *cf)
 {
@@ -2912,7 +2897,7 @@ rt_setup(pool *pp, struct rtable_config *cf)
 	if (t->id >= rtable_max_id)
 		rtable_max_id = t->id + 1;
 
-	fib_init(&t->fib, p, t->addr_type, sizeof(net), OFFSETOF(net, n), 0, net_init_entry);
+	fib_init(&t->fib, p, t->addr_type, sizeof(net), OFFSETOF(net, n), 0, NULL);
 
 	if (cf->trie_used)
 	{
