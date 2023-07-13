@@ -22,6 +22,11 @@
 #include "filter/filter.h"
 #include "filter/f-inst.h"
 
+
+pthread_mutex_t bgp_lock = PTHREAD_MUTEX_INITIALIZER;
+
+
+
 pool *proto_pool;
 static TLIST_LIST(proto) global_proto_list;
 
@@ -2162,6 +2167,7 @@ proto_do_down(struct proto *p)
 void
 proto_notify_state(struct proto *p, uint state)
 {
+
   uint ps = p->proto_state;
 
   DBG("%s reporting state transition %s -> %s\n", p->name, p_states[ps], p_states[state]);

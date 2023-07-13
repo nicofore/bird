@@ -36,11 +36,13 @@ rcu_gp_ongoing(_Atomic uint *ctl)
 static void
 update_counter_and_wait(void)
 {
+  
   atomic_fetch_xor(&rcu_gp_ctl, RCU_GP_PHASE);
   struct rcu_thread *rc;
   WALK_LIST(rc, rcu_thread_list)
     while (rcu_gp_ongoing(&rc->ctl))
       birdloop_yield();
+      
 }
 
 void

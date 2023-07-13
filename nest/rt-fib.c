@@ -190,9 +190,9 @@ u32 getHash(struct fib *f, atomic_uintptr_t *ptr)
 {
 	struct fib_node *node = (struct fib_node *)atomic_load(ptr);
 	if (atomic_load(&(node->sentinel)) & 1)
-		return getHashFromSentinel(f, ptr);
+		return reverseBits(getHashFromSentinel(f, ptr));
 	else
-		return reverseBits(net_hash(&(node->addr[0])));
+		return net_hash(&(node->addr[0]));
 }
 
 static uintptr_t getAddress(atomic_uintptr_t *ptr)
@@ -243,7 +243,7 @@ void printfib(struct fib *f)
 	while (atomic_load(&ptr) != 0)
 	{
 		struct fib_node *node = (struct fib_node *)atomic_load(&ptr);
-		if (node->sentinel)
+		if (node->sentinel & 1)
 			printf("\nSentinel node: ");
 		printf("%u ", getHash(f, &ptr));
 		atomic_store(&ptr, getNextAddress(&ptr));
@@ -423,14 +423,13 @@ fib_rehash(struct fib *f)
 #define CAST(t) (const net_addr_##t *)
 #define CAST2(t) (net_addr_##t *)
 
-#define FIB_HASH(f, a, t) (net_hash_##t(CAST(t) a) & atomic_load(&(f->hash_mask)))
 
 
 static inline u32
 fib_hash(struct fib *f, const net_addr *a)
 {
 	/* Same as FIB_HASH() */
-	return net_hash(a) & atomic_load(&(f->hash_mask));
+	return reverseBits(net_hash(a)) & atomic_load(&(f->hash_mask));
 }
 
 static void *
@@ -483,7 +482,7 @@ fib_insert2(struct fib *f, int row, u32 bucket)
 		atomic_store(succ, getNextAddress(curr));
 
 		// Find the right place to insert the node
-		while (atomic_load(succ) != 0 && reverseBits(getHash(f, succ)) < key)
+		while (atomic_load(succ) != 0 && getHash(f, succ) < key)
 		{
 			atomic_store(curr, getNextAddress(curr));
 			if (atomic_load(curr) == 0)
@@ -498,7 +497,7 @@ fib_insert2(struct fib *f, int row, u32 bucket)
 		// If node is a sentinel, succ is the sentinel or a node with the same value
 	
 		//Already exists
-		if (atomic_load(succ) != 0 && getHash(f, succ) == hash && getSentinel(succ)) {
+		if (atomic_load(succ) != 0 && getHash(f, succ) == key && getSentinel(succ)) {
 			if (new_node != NULL)
 			{
 				free(new_node);
@@ -515,7 +514,7 @@ fib_insert2(struct fib *f, int row, u32 bucket)
 		//Need to follow these condition to insert, else restart
 		//printf("Key curr is %u, wanting to insert %u\n", reverseBits(getHash(f, curr)), key);
 		
-		if (atomic_load(curr) != 0 && reverseBits(getHash(f, curr)) < key && (atomic_load(succ) == 0 || (atomic_load(succ) != 0 && reverseBits(getHash(f, succ)) >= key))) {
+		if (atomic_load(curr) != 0 && getHash(f, curr) < key && (atomic_load(succ) == 0 || (atomic_load(succ) != 0 && getHash(f, succ) >= key))) {
 			
 			if (new_node == NULL)
 			{
@@ -579,8 +578,8 @@ fib_find(struct fib *f, const net_addr *a)
 
 	int row = reserve_row(f);
 
-	u32 hash = net_hash(a);
-	u32 key = reverseBits(hash);
+	u32 hash = reverseBits(net_hash(a));
+	u32 key = net_hash(a);
 
 	atomic_uintptr_t *curr = &(f->soft_links[row][0]);
 
@@ -604,9 +603,9 @@ fib_find(struct fib *f, const net_addr *a)
 		}
 
 
-		while (atomic_load(curr) != 0 && reverseBits(getHash(f, curr)) <= key)
+		while (atomic_load(curr) != 0 && getHash(f, curr) <= key)
 		{
-			if (getHash(f, curr) == hash && getSentinel(curr) == 0)
+			if (getHash(f, curr) == key && getSentinel(curr) == 0)
 			{
 				// Check if same address
 				struct fib_node *node = (struct fib_node *)atomic_load(curr);
@@ -672,9 +671,9 @@ fib_get2(struct fib *f, const net_addr *a, int row)
 	atomic_uintptr_t *curr = &(f->soft_links[row][0]);
 	atomic_uintptr_t *succ = &(f->soft_links[row][1]);
 
-	u32 hash = net_hash(a);
+	u32 hash = reverseBits(net_hash(a));
 	u32 starting_bucket;
-	u32 key = reverseBits(hash);
+	u32 key = net_hash(a);
 	struct fib_node *new_node = NULL;
 	atomic_uintptr_t expected;
 
@@ -713,7 +712,7 @@ fib_get2(struct fib *f, const net_addr *a, int row)
 		atomic_store(succ, getNextAddress(curr));
 
 		//Find the right place to insert the node
-		while (atomic_load(succ) != 0 && reverseBits(getHash(f, succ)) < key)
+		while (atomic_load(succ) != 0 && getHash(f, succ) < key)
 		{
 			atomic_store(curr, getNextAddress(curr));
 			if (atomic_load(curr) == 0)
@@ -727,14 +726,14 @@ fib_get2(struct fib *f, const net_addr *a, int row)
 
 
 		//Can skip a node with the same hash if node deleted in front of curr
-		if (reverseBits(getHash(f, curr)) == key && !getSentinel(curr)){
+		if (getHash(f, curr) == key && !getSentinel(curr)){
 			goto start;
 		}
 
 		//Since there could be multiple nodes with same hashes, we need to keep advancing until we find the right node or reach the end of same hashes
-		while ((atomic_load(succ) != 0 && reverseBits(getHash(f, succ)) <= key))
+		while ((atomic_load(succ) != 0 && getHash(f, succ) <= key))
 		{
-			if (getHash(f, succ) == hash && !getSentinel(succ))
+			if (getHash(f, succ) == key && !getSentinel(succ))
 			{
 				// Check if same address
 				struct fib_node *node = (struct fib_node *)atomic_load(succ);
@@ -771,7 +770,7 @@ fib_get2(struct fib *f, const net_addr *a, int row)
 
 
 		//Last check for inserting
-		if (atomic_load(curr) != 0 && reverseBits(getHash(f, curr)) <= key && (atomic_load(succ) == 0 || (atomic_load(succ) != 0 && reverseBits(getHash(f, succ)) > key)))
+		if (atomic_load(curr) != 0 && getHash(f, curr) <= key && (atomic_load(succ) == 0 || (atomic_load(succ) != 0 && getHash(f, succ) > key)))
 		{
 			if (new_node == NULL)
 			{
@@ -788,7 +787,7 @@ fib_get2(struct fib *f, const net_addr *a, int row)
 			if (atomic_compare_exchange_strong(&(((struct fib_node *)atomic_load(curr))->next), &expected, (atomic_uintptr_t)new_node))
 			{
 				if (f->init)
-					f->init(new_node);
+					f->init(fib_node_to_user(f, new_node));
 				addALink((atomic_uintptr_t *)&new_node);
 				atomic_fetch_add(&(f->entries), 1);
 				atomic_store(curr, 0);
@@ -916,8 +915,9 @@ int fib_delete(struct fib *f, void *E)
 	atomic_uintptr_t *succ = &(f->soft_links[row][1]);
 
 	atomic_store(succ, (atomic_uintptr_t)n);
-	u32 hash = getHash(f, succ);
-	u32 key = reverseBits(hash);
+	u32 key = getHash(f, succ);
+	u32 hash = reverseBits(key);
+	
 
 	while (1)
 	{
@@ -939,7 +939,7 @@ int fib_delete(struct fib *f, void *E)
 		}
 
 		advance:
-		while (atomic_load(curr) != 0 && reverseBits(getHash(f, curr)) <= key && getNextAddress(curr) != atomic_load(succ))
+		while (atomic_load(curr) != 0 && getHash(f, curr) <= key && getNextAddress(curr) != atomic_load(succ))
 		{
 			atomic_store(curr, getNextAddress(curr));
 		}
@@ -1095,24 +1095,24 @@ void consistency_check(struct fib *f)
 
 	while (atomic_load(curr) != 0)
 	{
-		currKey = reverseBits(getHash(f, curr));
+		currKey = getHash(f, curr);
 		currSentinel = getSentinel(curr);
 
 		atomic_store(curr, getNextAddress(curr));
 
 		if (atomic_load(curr) != 0){
-			if (currKey >= reverseBits(getHash(f, curr))){
-				if (currKey == reverseBits(getHash(f, curr)) ){
+			if (currKey >= getHash(f, curr)){
+				if (currKey == getHash(f, curr)){
 					if (currSentinel && !getSentinel(curr)){
 					}
 					else {
 						//Problem
-						printf("Problem : curr : %u %u, next is %u %u\n", currKey, currSentinel, reverseBits(getHash(f, curr)), getSentinel(curr));
+						printf("Problem : curr : %u %u, next is %u %u\n", currKey, currSentinel, getHash(f, curr), getSentinel(curr));
 					}
 				}
 				else {
 					//Problem
-					printf("Key not in order : curr : %u %u, next is %u %u\n", currKey, currSentinel, reverseBits(getHash(f, curr)), getSentinel(curr));
+					printf("Key not in order : curr : %u %u, next is %u %u\n", currKey, currSentinel, getHash(f, curr), getSentinel(curr));
 					
 				}
 			}

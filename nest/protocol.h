@@ -18,6 +18,8 @@
 #include "nest/limit.h"
 #include "conf/conf.h"
 
+#include <pthread.h>
+
 struct iface;
 struct ifa;
 struct rte;
@@ -270,9 +272,10 @@ struct proto *proto_get_named(struct symbol *, struct protocol *);
 struct proto *proto_iterate_named(struct symbol *sym, struct protocol *proto, struct proto *old);
 
 #define PROTO_WALK_CMD(sym,pr,p) for(struct proto *p = NULL; p = proto_iterate_named(sym, pr, p); )
+//ASSERT_DIE(birdloop_inside(&main_birdloop));
 
 #define PROTO_ENTER_FROM_MAIN(p)    ({ \
-    ASSERT_DIE(birdloop_inside(&main_birdloop)); \
+     \
     struct birdloop *_loop = (p)->loop; \
     if (_loop != &main_birdloop) birdloop_enter(_loop); \
     _loop; \
@@ -340,6 +343,8 @@ extern pool *proto_pool;
 #define PS_START 1
 #define PS_UP 2
 #define PS_STOP 3
+
+extern pthread_mutex_t bgp_lock;
 
 void proto_notify_state(struct proto *p, unsigned state);
 

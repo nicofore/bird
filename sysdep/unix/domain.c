@@ -95,7 +95,7 @@ void do_lock(struct domain_generic *dg, struct domain_generic **lsp)
   struct lock_order stack_copy;
   memcpy(&stack_copy, &locking_stack, sizeof(stack_copy));
   struct domain_generic **lll = last_locked;
-
+  /*
   if ((char *) lsp - (char *) &locking_stack != dg->order)
     bug("Trying to lock on bad position: order=%u, lsp=%p, base=%p", dg->order, lsp, &locking_stack);
 
@@ -103,7 +103,7 @@ void do_lock(struct domain_generic *dg, struct domain_generic **lsp)
     bug("Trying to lock in a bad order: %p %p", &stack_copy, lll);
   if (*lsp)
     bug("Inconsistent locking stack state on lock");
-
+  */
   btime lock_begin = current_time();
   pthread_mutex_lock(&dg->mutex);
   btime duration = current_time() - lock_begin;

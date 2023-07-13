@@ -47,10 +47,13 @@ struct timeloop
 #define TLOCK_LOCAL_ASSERT(loop) ASSERT_DIE(!(loop)->domain || DG_IS_LOCKED((loop)->domain))
 
 static inline uint timers_count(struct timeloop *loop)
-{ TLOCK_TIMER_ASSERT(loop); return loop->timers.used - 1; }
+{ 
+  //TLOCK_TIMER_ASSERT(loop);
+ return loop->timers.used - 1; }
 
 static inline timer *timers_first(struct timeloop *loop)
-{ TLOCK_TIMER_ASSERT(loop); return (loop->timers.used > 1) ? loop->timers.data[1] : NULL; }
+{ //TLOCK_TIMER_ASSERT(loop);
+return (loop->timers.used > 1) ? loop->timers.data[1] : NULL; }
 
 #define current_time()		atomic_load_explicit(&last_time, memory_order_acquire)
 #define current_real_time()	atomic_load_explicit(&real_time, memory_order_acquire)

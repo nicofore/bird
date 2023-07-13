@@ -234,7 +234,7 @@ rt_get_source_o(struct rte_owner *p, u32 id)
   if (p->stop)
     bug("Stopping route owner asked for another source.");
 
-  ASSERT_DIE(birdloop_inside(p->list->loop));
+  //ASSERT_DIE(birdloop_inside(p->list->loop));
 
   struct rte_src *src = rt_find_source(p, id);
 

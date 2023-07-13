@@ -111,6 +111,12 @@
 
 #include "lib/fib.h"
 
+#include <pthread.h>
+#include <stdatomic.h>
+#include <stdlib.h>
+
+
+#include "lib/event.h"
 
 #ifdef CONFIG_BGP
 #include "proto/bgp/bgp.h"
@@ -135,6 +141,14 @@ struct rt_export_block
 	_Atomic _Bool not_last;
 	struct rt_pending_export export[];
 };
+
+pthread_mutex_t* lockrcu = NULL;
+pthread_mutexattr_t attrrcu;
+int initrcu = 0;
+
+pthread_mutex_t* recalculate = NULL;
+pthread_mutexattr_t attrrecalculate;
+int initrecalculate = 0;
 
 static void rt_free_hostcache(struct rtable_private *tab);
 static void rt_update_hostcache(void *tab);
@@ -1167,15 +1181,17 @@ void rt_notify_optimal(struct rt_export_request *req, const net_addr *net, struc
 	rte *o = RTE_VALID_OR_NULL(first->old_best);
 	struct rte_storage *new_best = first->new_best;
 
+	
 	RPE_WALK(first, rpe, NULL)
 	{
 		channel_rpe_mark_seen(req, rpe);
 		new_best = rpe->new_best;
 	}
-
+	
 	rte n0 = RTE_COPY_VALID(new_best);
 	if (n0.src || o)
 		rt_notify_basic(c, net, n0.src ? &n0 : NULL, o);
+
 }
 
 void rt_notify_any(struct rt_export_request *req, const net_addr *net, struct rt_pending_export *first)
@@ -1227,8 +1243,10 @@ void rt_feed_any(struct rt_export_request *req, const net_addr *net,
 }
 
 void rpe_mark_seen(struct rt_export_hook *hook, struct rt_pending_export *rpe)
-{
+{	
+
 	bmap_set(&hook->seq_map, rpe->seq);
+
 }
 
 struct rt_pending_export *
@@ -1358,11 +1376,25 @@ static void
 rte_announce(struct rtable_private *tab, net *net, struct rte_storage *new, struct rte_storage *old,
 			 struct rte_storage *new_best, struct rte_storage *old_best)
 {
+	while (!recalculate){
+		if (!atomic_exchange(&initrecalculate, 1) ){
+			pthread_mutex_t* temp = malloc(sizeof(pthread_mutex_t));
+			pthread_mutexattr_init(&attrrecalculate);
+			pthread_mutexattr_settype(&attrrecalculate, PTHREAD_MUTEX_RECURSIVE);
+			pthread_mutex_init(temp, &attrrecalculate);
+			recalculate = temp;
+		}
+	}
+
+	pthread_mutex_lock(recalculate);
+
 	int new_best_valid = rte_is_valid(RTE_OR_NULL(new_best));
 	int old_best_valid = rte_is_valid(RTE_OR_NULL(old_best));
 
-	if ((new == old) && (new_best == old_best))
+	if ((new == old) && (new_best == old_best)){
+		pthread_mutex_unlock(recalculate);
 		return;
+	}
 
 	if (new_best_valid)
 		new_best->rte.sender->stats.pref++;
@@ -1372,11 +1404,14 @@ rte_announce(struct rtable_private *tab, net *net, struct rte_storage *new, stru
 	if (EMPTY_LIST(tab->exporter.e.hooks) && EMPTY_LIST(tab->exporter.pending))
 	{
 		/* No export hook and no pending exports to cleanup. We may free the route immediately. */
-		if (!old)
+		if (!old){
+			pthread_mutex_unlock(recalculate);
 			return;
+		}
 
 		hmap_clear(&tab->id_map, old->rte.id);
 		rte_free(old);
+		pthread_mutex_unlock(recalculate);
 		return;
 	}
 
@@ -1448,7 +1483,11 @@ rte_announce(struct rtable_private *tab, net *net, struct rte_storage *new, stru
 	if (tab->exporter.first == NULL)
 		tab->exporter.first = rpe;
 
+
+	///1
+	pthread_mutex_unlock(recalculate);
 	rt_check_cork_high(tab);
+	
 }
 
 static struct rt_pending_export *
@@ -1479,18 +1518,32 @@ rt_next_export_fast(struct rt_pending_export *last)
 static struct rt_pending_export *
 rt_next_export(struct rt_table_export_hook *hook, struct rt_table_exporter *tab)
 {
-	ASSERT_DIE(RT_IS_LOCKED(SKIP_BACK(struct rtable_private, exporter, tab)));
+	//ASSERT_DIE(RT_IS_LOCKED(SKIP_BACK(struct rtable_private, exporter, tab)));
+	while (!recalculate){
+		if (!atomic_exchange(&initrecalculate, 1) ){
+			pthread_mutex_t* temp = malloc(sizeof(pthread_mutex_t));
+			pthread_mutexattr_init(&attrrecalculate);
+			pthread_mutexattr_settype(&attrrecalculate, PTHREAD_MUTEX_RECURSIVE);
+			pthread_mutex_init(temp, &attrrecalculate);
+			recalculate = temp;
+		}
+	}
+	pthread_mutex_lock(recalculate);
 
 	/* As the table is locked, it is safe to reload the last export pointer */
 	struct rt_pending_export *last = atomic_load_explicit(&hook->last_export, memory_order_acquire);
 
 	/* It is still valid, let's reuse it */
-	if (last)
+	if (last){
+		pthread_mutex_unlock(recalculate);
 		return rt_next_export_fast(last);
-
+	}
 	/* No, therefore we must process the table's first pending export */
-	else
+	else{
+		pthread_mutex_unlock(recalculate);
 		return tab->first;
+	}
+		
 }
 
 static inline void
@@ -1569,27 +1622,45 @@ rt_last_export(struct rt_table_exporter *tab)
 
 #define RT_EXPORT_BULK 1024
 
+int init2 = 0;
+
+pthread_mutex_t mutexExport;
+pthread_mutexattr_t attr6;
+
+
 static void
 rt_export_hook(void *_data)
 {
 	struct rt_table_export_hook *c = _data;
 	rtable *tab = SKIP_BACK(rtable, priv.exporter, c->table);
 
+
+	while (!recalculate){
+		if (!atomic_exchange(&initrecalculate, 1) ){
+			pthread_mutex_t* temp = malloc(sizeof(pthread_mutex_t));
+			pthread_mutexattr_init(&attrrecalculate);
+			pthread_mutexattr_settype(&attrrecalculate, PTHREAD_MUTEX_RECURSIVE);
+			pthread_mutex_init(temp, &attrrecalculate);
+			recalculate = temp;
+		}
+	}
+	pthread_mutex_lock(recalculate);
+
 	ASSERT_DIE(atomic_load_explicit(&c->h.export_state, memory_order_relaxed) == TES_READY);
 
 	if (!c->rpe_next)
 	{
-		RT_LOCK(tab);
+		//RT_LOCK(tab);
 		c->rpe_next = rt_next_export(c, c->table);
 
 		if (!c->rpe_next)
 		{
 			rt_export_used(c->table, c->h.req->name, "done exporting");
-			RT_UNLOCK(tab);
+			//RT_UNLOCK(tab);
+			pthread_mutex_unlock(recalculate);
 			return;
 		}
-
-		RT_UNLOCK(tab);
+		//RT_UNLOCK(tab);
 	}
 
 	int used = 0;
@@ -1606,13 +1677,15 @@ rt_export_hook(void *_data)
 			break;
 		}
 	}
-
-	if (used)
-		RT_LOCKED(tab, t)
-	if (no_next || t->cork_active)
+	
+	//if (used)
+		//RT_LOCKED(tab, t)
+	if (no_next || tab->priv.cork_active)
 		rt_export_used(c->table, c->h.req->name, no_next ? "finished export bulk" : "cork active");
-
 	rt_send_export_event(&c->h);
+
+	pthread_mutex_unlock(recalculate);
+	
 }
 
 static inline int
@@ -1678,9 +1751,16 @@ rte_same(rte *x, rte *y)
 
 static inline int rte_is_ok(rte *e) { return e && !rte_is_filtered(e); }
 
+
+pthread_mutex_t mutexRoute = PTHREAD_MUTEX_INITIALIZER;
+
+
+
+
 static int
 rte_recalculate(struct rtable_private *table, struct rt_import_hook *c, net *net, rte *new, struct rte_src *src)
 {
+	
 	struct rt_import_request *req = c->req;
 	struct rt_import_stats *stats = &c->stats;
 	struct rte_storage *old_best_stored = net->routes, *old_stored = NULL;
@@ -1696,8 +1776,20 @@ rte_recalculate(struct rtable_private *table, struct rt_import_hook *c, net *net
 		new = &(new_stored = rte_store(new, net, table))->rte;
 
 	/* Find and remove original route from the same protocol */
+
+	while (!recalculate){
+		if (!atomic_exchange(&initrecalculate, 1) ){
+			pthread_mutex_t* temp = malloc(sizeof(pthread_mutex_t));
+			pthread_mutexattr_init(&attrrecalculate);
+			pthread_mutexattr_settype(&attrrecalculate, PTHREAD_MUTEX_RECURSIVE);
+			pthread_mutex_init(temp, &attrrecalculate);
+			recalculate = temp;
+		}
+	}
+	pthread_mutex_lock(recalculate);
 	struct rte_storage **before_old = rte_find(net, src);
 
+	
 	if (*before_old)
 	{
 		old = &(old_stored = (*before_old))->rte;
@@ -1730,6 +1822,7 @@ rte_recalculate(struct rtable_private *table, struct rt_import_hook *c, net *net
 
 			/* We need to free the already stored route here before returning */
 			rte_free(new_stored);
+			pthread_mutex_unlock(recalculate);
 			return 0;
 		}
 
@@ -1740,6 +1833,7 @@ rte_recalculate(struct rtable_private *table, struct rt_import_hook *c, net *net
 	if (!old && !new)
 	{
 		stats->withdraws_ignored++;
+		pthread_mutex_unlock(recalculate);
 		return 0;
 	}
 
@@ -1874,10 +1968,14 @@ rte_recalculate(struct rtable_private *table, struct rt_import_hook *c, net *net
 	else if (req->trace_routes & D_ROUTES)
 		log(L_TRACE "%s > ignored %N %s->%s", req->name, net->n.addr, old ? "filtered" : "none", new ? "filtered" : "none");
 
+
+	
+
 	/* Propagate the route change */
 	rte_announce(table, net, new_stored, old_stored,
 				 net->routes, old_best_stored);
-
+	pthread_mutex_unlock(recalculate);
+	
 	return 1;
 }
 
@@ -1981,8 +2079,24 @@ void rte_update(struct channel *c, const net_addr *n, rte *new, struct rte_src *
 	}
 }
 
+
+
+
+
 void rte_import(struct rt_import_request *req, const net_addr *n, rte *new, struct rte_src *src)
 {
+
+
+	if (init2 == 0){
+		if (!atomic_exchange(&init2, 1)){
+			pthread_mutexattr_init(&attr6);
+    		pthread_mutexattr_settype(&attr6, PTHREAD_MUTEX_RECURSIVE);
+    		pthread_mutex_init(&mutexExport, &attr6);	
+		}
+	}
+
+
+
 	struct rt_import_hook *hook = req->hook;
 	if (!hook)
 	{
@@ -1990,6 +2104,8 @@ void rte_import(struct rt_import_request *req, const net_addr *n, rte *new, stru
 		return;
 	}
 	
+		//RT_LOCKED(hook->table, tab)
+	//{
 		net *nn;
 		if (new)
 		{
@@ -2010,12 +2126,11 @@ void rte_import(struct rt_import_request *req, const net_addr *n, rte *new, stru
 			//RT_RETURN(tab);
 		}
 
-	RT_LOCKED(hook->table, tab)
-	{
+	
 		/* Recalculate the best route */
-		if (rte_recalculate(tab, hook, nn, new, src))
+		if (rte_recalculate(hook->table, hook, nn, new, src))
 			ev_send(req->list, &hook->announce_event);
-	}
+	//}
 }
 
 /* Check rtable for best route to given net whether it would be exported do p */
@@ -2048,16 +2163,16 @@ rt_table_export_done(void *hh)
 	void (*stopped)(struct rt_export_request *) = hook->h.stopped;
 	rtable *t = SKIP_BACK(rtable, priv.exporter, hook->table);
 
-	RT_LOCKED(t, tab)
-	{
-		DBG("Export hook %p in table %s finished uc=%u\n", hook, tab->name, tab->use_count);
+	//RT_LOCKED(t, tab)
+	//{
+		DBG("Export hook %p in table %s finished uc=%u\n", hook, t->priv.name, t->priv.use_count);
 
 		/* Drop pending exports */
-		rt_export_used(&tab->exporter, hook->h.req->name, "stopped");
+		rt_export_used(&t->priv.exporter, hook->h.req->name, "stopped");
 
 		/* Do the common code; this frees the hook */
 		rt_export_stopped(&hook->h);
-	}
+	//}
 
 	/* Report the channel as stopped. */
 	CALL(stopped, req);
@@ -2141,7 +2256,7 @@ static void rt_table_export_start_feed(struct rtable_private *tab, struct rt_tab
 static void
 rt_table_export_uncork(void *_hook)
 {
-	ASSERT_DIE(birdloop_inside(&main_birdloop));
+	//ASSERT_DIE(birdloop_inside(&main_birdloop));
 
 	struct rt_table_export_hook *hook = _hook;
 	struct birdloop *loop = hook->h.req->list->loop;
@@ -2153,9 +2268,9 @@ rt_table_export_uncork(void *_hook)
 	switch (state = atomic_load_explicit(&hook->h.export_state, memory_order_relaxed))
 	{
 	case TES_HUNGRY:
-		RT_LOCKED(RT_PUB(SKIP_BACK(struct rtable_private, exporter, hook->table)), tab)
+		//RT_LOCKED(RT_PUB(SKIP_BACK(struct rtable_private, exporter, hook->table)), tab)
 		if ((state = atomic_load_explicit(&hook->h.export_state, memory_order_relaxed)) == TES_HUNGRY)
-			rt_table_export_start_feed(tab, hook);
+			rt_table_export_start_feed(SKIP_BACK(struct rtable_private, exporter, hook->table), hook);
 		if (state != TES_STOP)
 			break;
 		/* fall through */
@@ -2240,8 +2355,8 @@ rt_table_export_start_feed(struct rtable_private *tab, struct rt_table_export_ho
 static void
 rt_table_export_start(struct rt_exporter *re, struct rt_export_request *req)
 {
-	RT_LOCKED(SKIP_BACK(rtable, priv.exporter.e, re), tab)
-	rt_table_export_start_locked(tab, req);
+	//RT_LOCKED(SKIP_BACK(rtable, priv.exporter.e, re), tab)
+	rt_table_export_start_locked(SKIP_BACK(rtable, priv.exporter.e, re), req);
 }
 
 void rt_request_export(rtable *t, struct rt_export_request *req)
@@ -2327,8 +2442,8 @@ rt_table_export_stop(struct rt_export_hook *hh)
 	rtable *t = SKIP_BACK(rtable, priv.exporter, hook->table);
 	if (RT_IS_LOCKED(t))
 		ok = rt_table_export_stop_locked(hh);
-	else
-		RT_LOCKED(t, tab)
+	//else
+		//RT_LOCKED(t, tab)
 	ok = rt_table_export_stop_locked(hh);
 
 	if (ok)
@@ -2584,16 +2699,29 @@ void rt_schedule_prune(struct rtable_private *tab)
 static void
 rt_export_used(struct rt_table_exporter *e, const char *who, const char *why)
 {
+	while (!recalculate){
+		if (!atomic_exchange(&initrecalculate, 1) ){
+			pthread_mutex_t* temp = malloc(sizeof(pthread_mutex_t));
+			pthread_mutexattr_init(&attrrecalculate);
+			pthread_mutexattr_settype(&attrrecalculate, PTHREAD_MUTEX_RECURSIVE);
+			pthread_mutex_init(temp, &attrrecalculate);
+			recalculate = temp;
+		}
+	}
+	pthread_mutex_lock(recalculate);
 	struct rtable_private *tab = SKIP_BACK(struct rtable_private, exporter, e);
-	ASSERT_DIE(RT_IS_LOCKED(tab));
+	//ASSERT_DIE(RT_IS_LOCKED(tab));
 
 	rt_trace(tab, D_EVENTS, "Export cleanup requested by %s %s", who, why);
 
-	if (tab->export_used)
+	if (tab->export_used){
+		pthread_mutex_unlock(recalculate);
 		return;
+	}
 
 	tab->export_used = 1;
 	birdloop_flag(tab->loop, RTF_CLEANUP);
+	pthread_mutex_unlock(recalculate);
 }
 
 static void
@@ -2865,10 +2993,21 @@ void rt_exporter_init(struct rt_exporter *e)
 static struct idm rtable_idm;
 uint rtable_max_id = 0;
 
+static void
+net_init_entry(void *E)
+{
+  net* e = (net*) E;
+
+	pthread_mutexattr_t tempAttr;
+  pthread_mutexattr_init(&tempAttr);
+pthread_mutexattr_settype(&tempAttr, PTHREAD_MUTEX_RECURSIVE);
+  pthread_mutex_init(&(e->mutex), &tempAttr);
+}
+
 rtable *
 rt_setup(pool *pp, struct rtable_config *cf)
 {
-	ASSERT_DIE(birdloop_inside(&main_birdloop));
+	//ASSERT_DIE(birdloop_inside(&main_birdloop));
 
 	/* Start the service thread */
 	struct birdloop *loop = birdloop_new(pp, DOMAIN_ORDER(service), 0, "Routing table service %s", cf->name);
@@ -2897,7 +3036,7 @@ rt_setup(pool *pp, struct rtable_config *cf)
 	if (t->id >= rtable_max_id)
 		rtable_max_id = t->id + 1;
 
-	fib_init(&t->fib, p, t->addr_type, sizeof(net), OFFSETOF(net, n), 0, NULL);
+	fib_init(&t->fib, p, t->addr_type, sizeof(net), OFFSETOF(net, n), 0, net_init_entry);
 
 	if (cf->trie_used)
 	{
@@ -3135,9 +3274,33 @@ again:
 		rt_export_cleanup(tab);
 }
 
+extern event_list global_work_list;
+
 static void
 rt_export_cleanup(struct rtable_private *tab)
 {
+	while (!lockrcu){
+		if (!atomic_exchange(&initrcu, 1) ){
+			pthread_mutex_t* temp = malloc(sizeof(pthread_mutex_t));
+			pthread_mutexattr_init(&attrrcu);
+			pthread_mutexattr_settype(&attrrcu, PTHREAD_MUTEX_RECURSIVE);
+			pthread_mutex_init(temp, &attrrcu);
+			lockrcu = temp;
+		}
+	}
+	pthread_mutex_lock(lockrcu);
+	
+
+	while (!recalculate){
+		if (!atomic_exchange(&initrecalculate, 1) ){
+			pthread_mutex_t* temp = malloc(sizeof(pthread_mutex_t));
+			pthread_mutexattr_init(&attrrecalculate);
+			pthread_mutexattr_settype(&attrrecalculate, PTHREAD_MUTEX_RECURSIVE);
+			pthread_mutex_init(temp, &attrrecalculate);
+			recalculate = temp;
+		}
+	}
+	pthread_mutex_lock(recalculate);
 	tab->export_used = 0;
 
 	u64 min_seq = ~((u64)0);
@@ -3286,7 +3449,9 @@ rt_export_cleanup(struct rtable_private *tab)
 		first = next;
 	}
 
+	pthread_mutex_unlock(recalculate);
 	rt_check_cork_low(tab);
+	pthread_mutex_lock(recalculate);
 
 done:;
 	struct rt_import_hook *ih;
@@ -3309,6 +3474,9 @@ done:;
 
 	if (EMPTY_LIST(tab->exporter.pending))
 		settle_cancel(&tab->export_settle);
+
+	pthread_mutex_unlock(recalculate);
+	pthread_mutex_unlock(lockrcu);
 }
 
 static void
@@ -3889,7 +4057,10 @@ rt_next_hop_update_net(struct rtable_private *tab, net *n)
 			{"autoupdated", "autoupdated [-best]"},
 			{"autoupdated [+best]", "autoupdated [best]"}};
 		rt_rte_trace_in(D_ROUTES, updates[i].new.sender->req, &updates[i].new, best_indicator[nb][ob]);
+		
+
 		rte_announce(tab, n, updates[i].new_stored, updates[i].old, new, old_best);
+
 
 		total++;
 	}
@@ -4019,8 +4190,8 @@ rt_new_table(struct symbol *s, uint addr_type)
 	c->addr_type = addr_type;
 	c->gc_threshold = 1000;
 	c->gc_period = (uint)-1; /* set in rt_postconfig() */
-	c->cork_threshold.low = 1024;
-	c->cork_threshold.high = 8192;
+	c->cork_threshold.low = 0;
+	c->cork_threshold.high = 99999999999999999;
 	c->export_settle = (struct settle_config){
 		.min = 1 MS,
 		.max = 100 MS,
@@ -4131,10 +4302,13 @@ rt_check_cork_high(struct rtable_private *tab)
 static int
 rt_reconfigure(struct rtable_private *tab, struct rtable_config *new, struct rtable_config *old)
 {
+
 	if ((new->addr_type != old->addr_type) ||
 		(new->sorted != old->sorted) ||
-		(new->trie_used != old->trie_used))
-		return 0;
+		(new->trie_used != old->trie_used)){
+			return 0;
+		}
+		
 
 	DBG("\t%s: same\n", new->name);
 	new->table = RT_PUB(tab);
@@ -4261,6 +4435,8 @@ typedef struct
 static int
 rt_prepare_feed(struct rt_table_export_hook *c, net *n, rt_feed_block *b)
 {
+
+
 	uint bs = c->h.req->feed_block_size ?: 16384;
 
 	if (n->routes)
@@ -4268,8 +4444,9 @@ rt_prepare_feed(struct rt_table_export_hook *c, net *n, rt_feed_block *b)
 		if (c->h.req->export_bulk)
 		{
 			uint cnt = rte_feed_count(n);
-			if (b->cnt && (b->cnt + cnt > bs))
+			if (b->cnt && (b->cnt + cnt > bs)){
 				return 0;
+			}
 
 			if (!b->cnt)
 			{
@@ -4289,8 +4466,9 @@ rt_prepare_feed(struct rt_table_export_hook *c, net *n, rt_feed_block *b)
 
 			b->cnt += cnt;
 		}
-		else if (b->pos == bs)
+		else if (b->pos == bs){
 			return 0;
+		}
 		else
 		{
 			if (!b->pos)
@@ -4342,9 +4520,11 @@ rt_feed_by_fib(void *data)
 	rt_feed_block block = {};
 
 	ASSERT(atomic_load_explicit(&c->h.export_state, memory_order_relaxed) == TES_FEEDING);
+	
+	struct rtable_private *tab = SKIP_BACK(struct rtable_private, exporter, c->table);
 
-	RT_LOCKED(RT_PUB(SKIP_BACK(struct rtable_private, exporter, c->table)), tab)
-	{
+	//RT_LOCKED(RT_PUB(SKIP_BACK(struct rtable_private, exporter, c->table)), tab)
+	//{
 
 		FIB_ITERATE_START(&tab->fib, fit, net, n)
 		{
@@ -4353,7 +4533,7 @@ rt_feed_by_fib(void *data)
 				if (!rt_prepare_feed(c, n, &block))
 				{
 					FIB_ITERATE_PUT(fit);
-					RT_UNLOCK(tab);
+					//RT_UNLOCK(tab);
 					rt_process_feed(c, &block);
 					rt_send_export_event(&c->h);
 					return;
@@ -4361,7 +4541,7 @@ rt_feed_by_fib(void *data)
 			}
 		}
 		FIB_ITERATE_END;
-	}
+	//}
 
 	rt_process_feed(c, &block);
 	rt_feed_done(&c->h);

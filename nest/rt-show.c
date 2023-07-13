@@ -359,12 +359,15 @@ rt_show_add_exporter(struct rt_show_data *d, struct rt_exporter *t, const char *
   return tab;
 }
 
+
+
 struct rt_show_data_rtable *
 rt_show_add_table(struct rt_show_data *d, rtable *t)
 {
   struct rt_show_data_rtable *rsdr;
-  RT_LOCKED(t, tp)
-    rsdr = rt_show_add_exporter(d, &tp->exporter.e, t->name);
+  
+  //RT_LOCKED(t, tp)
+    rsdr = rt_show_add_exporter(d, &t->priv.exporter.e, t->name);
 
   struct proto_config *krt = t->config->krt_attached;
   if (krt)

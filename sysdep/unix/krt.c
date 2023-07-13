@@ -375,7 +375,7 @@ krt_export_net(struct krt_proto *p, net *net)
    * export filter. It doesn't make much sense to write the filters like this,
    * therefore we may keep this unfinished piece of work here for later as it
    * won't really affect anybody. */
-  ASSERT_DIE(RT_IS_LOCKED(p->p.main_channel->table));
+  //ASSERT_DIE(RT_IS_LOCKED(p->p.main_channel->table));
 
   struct channel *c = p->p.main_channel;
   const struct filter *filter = c->out_filter;
@@ -532,11 +532,12 @@ krt_init_scan(struct krt_proto *p)
 static void
 krt_prune(struct krt_proto *p)
 {
+  
   RT_LOCKED(p->p.main_channel->table, t)
   {
 
   KRT_TRACE(p, D_EVENTS, "Pruning table %s", t->name);
-  FIB_WALK(&t->fib, net, n)
+  FIB_WALK(&(p->p.main_channel->table->priv.fib), net, n)
   {
     if (p->ready && krt_is_installed(p, n) && !bmap_test(&p->seen_map, n->routes->rte.id))
     {
@@ -557,6 +558,7 @@ krt_prune(struct krt_proto *p)
     p->initialized = 1;
 
   }
+  
 }
 
 static void

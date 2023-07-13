@@ -24,6 +24,8 @@
 
 #include <stdatomic.h>
 
+#include <pthread.h>
+
 struct ea_list;
 struct protocol;
 struct proto;
@@ -224,6 +226,7 @@ static inline int rt_cork_check(event *e)
 typedef struct network {
   struct rte_storage *routes;		/* Available routes for this network */
   struct rt_pending_export *first, *last;
+   pthread_mutex_t mutex;
   struct fib_node n;			/* FIB flags reserved for kernel syncer */
 } net;
 
@@ -564,7 +567,7 @@ void rt_unlock_table_priv(struct rtable_private *, const char *file, uint line);
 static inline void rt_lock_table_pub(rtable *t, const char *file, uint line)
 { RT_LOCKED(t, tt) rt_lock_table_priv(tt, file, line); }
 static inline void rt_unlock_table_pub(rtable *t, const char *file, uint line)
-{ RT_LOCKED(t, tt) rt_unlock_table_priv(tt, file, line); }
+{ /*RT_LOCKED(t, tt) rt_unlock_table_priv(tt, file, line);*/ }
 
 #define rt_lock_table(t)	_Generic((t),  rtable *: rt_lock_table_pub, \
 				struct rtable_private *: rt_lock_table_priv)((t), __FILE__, __LINE__)

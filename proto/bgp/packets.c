@@ -25,6 +25,10 @@
 
 #include "nest/cli.h"
 
+#include "lib/threadpool.h"
+#include <stdatomic.h>
+#include <stdio.h>
+
 #include "bgp.h"
 
 
@@ -2552,9 +2556,32 @@ bgp_decode_nlri(struct bgp_parse_state *s, u32 afi, byte *nlri, uint len, ea_lis
   rt_unlock_source(s->last_src);
 }
 
-static void
-bgp_rx_update(struct bgp_conn *conn, byte *pkt, uint len)
-{
+
+struct arguments{
+	struct bgp_conn *conn;
+	uint len;
+	byte *pkt;
+};
+
+
+// Number of threads for the pool
+#define NBTHREADS 12
+// Pool that will handle the update packets
+threadpool_t *tpool = NULL;
+// A local pool for each thread
+linpool *pools[NBTHREADS];
+byte init = 0;
+
+void update_function(void *data){
+
+  argsf_t *args = (argsf_t *) data;
+	uint threadnumber = args->threadnumber;
+	struct arguments *argf = (struct arguments *) args->data;
+
+	struct bgp_conn *conn = argf->conn;
+	byte* pkt = argf->pkt;
+	uint len = argf->len;
+
   struct bgp_proto *p = conn->bgp;
   ea_list *ea = NULL;
 
@@ -2569,7 +2596,8 @@ bgp_rx_update(struct bgp_conn *conn, byte *pkt, uint len)
   if (conn->state != BS_ESTABLISHED)
   { bgp_error(conn, 5, fsm_err_subcode[conn->state], NULL, 0); return; }
 
-  bgp_start_timer(p, conn->hold_timer, conn->hold_time);
+  bgp_start_timer(conn->bgp, conn->hold_timer, conn->hold_time);
+  //bgp_start_timer(conn->bgp, conn->hold_timer, 36000);
 
   struct lp_state *tmpp = lp_save(tmp_linpool);
 
@@ -2658,7 +2686,32 @@ bgp_rx_update(struct bgp_conn *conn, byte *pkt, uint len)
 done:
   rta_free(s.cached_ea);
   lp_restore(tmp_linpool, tmpp);
+  free(pkt);
+	free(argf);
+
   return;
+
+}
+
+static void
+bgp_rx_update(struct bgp_conn *conn, byte *pkt, uint len)
+{
+
+  if (init == 0){
+    if (!atomic_exchange(&init, 1)){
+      for (int i = 0; i < NBTHREADS; i++){
+		  }
+		tpool = mb_allocz(&root_pool, sizeof(threadpool_t));
+		threadpool_init(tpool, NBTHREADS, update_function);
+    }
+	}
+	struct arguments *args = malloc(sizeof(struct arguments));
+	args->conn = conn;
+	args->pkt = malloc(len);
+	memcpy(args->pkt, pkt, len);
+	args->len = len;
+	threadpool_add(tpool, args);
+  //bgp_start_timer(conn->bgp, conn->hold_timer, 360000);
 }
 
 static uint

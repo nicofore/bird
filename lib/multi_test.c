@@ -8,6 +8,7 @@
 #include <unistd.h>
 #include <stdlib.h>
 #include <pthread.h>
+#include "nest/rt.h"
 
 
 
@@ -109,6 +110,8 @@ static int t_fib_10000_address(void)
 
 	return 1;
 }
+
+
 
 void *f_multi_Add(void *argus)
 {
@@ -551,6 +554,8 @@ int main(int argc, char *argv[])
 	bt_test_suite(t_fib_10000_address, "Testing Adding/find/remove operation fib");
 	bt_test_suite(t_multi_get_different, "Testing Adding/remove operation in multithreaded fib");
 	bt_test_suite(t_multi_get_same, "Testing Adding/remove operation in multithreaded fib");
+
+
 
 	bt_test_suite(t_single_walk, "Testing single walk");
 	bt_test_suite(t_multi_walk, "Testing multi walk");

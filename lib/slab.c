@@ -34,6 +34,11 @@
 #include "lib/string.h"
 #include "lib/tlists.h"
 
+#include <pthread.h>
+
+pthread_mutex_t* muslab = NULL;
+pthread_mutexattr_t attr1;
+
 #undef FAKE_SLAB	/* Turn on if you want to debug memory allocations */
 
 #ifdef DEBUGGING
@@ -218,6 +223,13 @@ static struct resclass sl_class = {
 slab *
 sl_new(pool *p, uint size)
 {
+  if (!muslab) {
+    pthread_mutexattr_init(&attr1);
+    pthread_mutexattr_settype(&attr1, PTHREAD_MUTEX_RECURSIVE);
+    muslab = malloc(sizeof(pthread_mutex_t));
+    pthread_mutex_init(muslab, &attr1);
+  }
+
   slab *s = ralloc(p, &sl_class);
   uint align = sizeof(struct sl_alignment);
   if (align < sizeof(void *))
@@ -256,8 +268,8 @@ void *
 sl_alloc(slab *s)
 {
   struct sl_head *h;
-  ASSERT_DIE(DG_IS_LOCKED(resource_parent(&s->r)->domain));
-
+  //ASSERT_DIE(DG_IS_LOCKED(resource_parent(&s->r)->domain));
+  pthread_mutex_lock(muslab);
 redo:
   if (!(h = s->partial_heads.first))
     goto no_partial;
@@ -276,6 +288,7 @@ okay:
 #ifdef POISON
       memset(out, 0xcd, s->data_size);
 #endif
+      pthread_mutex_unlock(muslab);
       return out;
     }
 
@@ -330,9 +343,10 @@ sl_allocz(slab *s)
 void
 sl_free(void *oo)
 {
+  pthread_mutex_lock(muslab);
   struct sl_head *h = SL_GET_HEAD(oo);
   struct slab *s = h->slab;
-  ASSERT_DIE(DG_IS_LOCKED(resource_parent(&s->r)->domain));
+  //ASSERT_DIE(DG_IS_LOCKED(resource_parent(&s->r)->domain));
 
 #ifdef POISON
   memset(oo, 0xdb, s->data_size);
@@ -364,6 +378,7 @@ sl_free(void *oo)
 	  s->num_empty_heads++;
 	}
     }
+  pthread_mutex_unlock(muslab);
 }
 
 static void

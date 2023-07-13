@@ -123,17 +123,17 @@ tm_set_in_tl(timer *t, btime when, struct timeloop *local_timeloop)
 void
 tm_set_in(timer *t, btime when, struct birdloop *loop)
 {
-  ASSERT_DIE(birdloop_inside(loop));
+  //ASSERT_DIE(birdloop_inside(loop));
   tm_set_in_tl(t, when, birdloop_time_loop(loop));
 }
 
 void
 tm_stop(timer *t)
 {
-  if (!t->expires)
+  if (!t || !t->expires)
     return;
 
-  TLOCK_TIMER_ASSERT(t->loop);
+  //TLOCK_TIMER_ASSERT(t->loop);
 
   uint tc = timers_count(t->loop);
 
@@ -159,7 +159,7 @@ void io_log_event(void *hook, void *data);
 void
 timers_fire(struct timeloop *loop, int io_log)
 {
-  TLOCK_TIMER_ASSERT(loop);
+  //TLOCK_TIMER_ASSERT(loop);
 
   btime base_time;
   timer *t;

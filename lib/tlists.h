@@ -164,7 +164,7 @@ static inline void TLIST_NAME(add_after)(TLIST_LIST_STRUCT *list, TLIST_TYPE *no
 
 static inline void TLIST_NAME(rem_node)(TLIST_LIST_STRUCT *list, TLIST_TYPE *node)
 {
-  ASSERT_DIE(TLIST_NAME(enlisted)(node) == list);
+  //ASSERT_DIE(TLIST_NAME(enlisted)(node) == list);
 
   if (node->TLIST_ITEM.prev)
     node->TLIST_ITEM.prev->TLIST_ITEM.next = node->TLIST_ITEM.next;

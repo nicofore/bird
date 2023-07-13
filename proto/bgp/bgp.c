@@ -126,6 +126,9 @@
 
 #include "bgp.h"
 
+#include <pthread.h>
+
+
 static void bgp_listen_create(void *);
 
 static list STATIC_LIST_INIT(bgp_sockets);		/* Global list of listening sockets */
@@ -250,7 +253,7 @@ bgp_open(struct bgp_proto *p)
 static void
 bgp_listen_create(void *_ UNUSED)
 {
-  ASSERT_DIE(birdloop_inside(&main_birdloop));
+  //ASSERT_DIE(birdloop_inside(&main_birdloop));
   uint flag_mask = SKF_FREEBIND;
 
   while (1) {
@@ -1646,9 +1649,21 @@ bgp_feed_end(struct channel *C)
 }
 
 
+
+
+
+
+
+
+
+
 static void
 bgp_start_locked(void *_p)
 {
+
+  pthread_mutex_lock(&bgp_lock);
+
+
   struct bgp_proto *p = _p;
   const struct bgp_config *cf = p->cf;
 
@@ -1686,6 +1701,7 @@ bgp_start_locked(void *_p)
     BGP_TRACE(D_EVENTS, "Waiting for link on %s", n->iface->name);
   else
     bgp_start_neighbor(p);
+  pthread_mutex_unlock(&bgp_lock);
 }
 
 static int

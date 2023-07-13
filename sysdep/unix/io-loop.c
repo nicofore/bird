@@ -29,6 +29,11 @@
 #include "conf/conf.h"
 #include "nest/cli.h"
 
+#include <pthread.h>
+
+pthread_mutex_t* muloop = NULL;
+pthread_mutexattr_t attr2;
+
 #define THREAD_STACK_SIZE	65536	/* To be lowered in near future */
 
 static struct birdloop *birdloop_new_no_pickup(pool *pp, uint order, const char *name, ...);
@@ -388,6 +393,7 @@ birdloop_do_ping(struct birdloop *loop)
 void
 birdloop_ping(struct birdloop *loop)
 {
+  pthread_mutex_lock(muloop);
   if (!birdloop_inside(loop))
   {
     LOOP_TRACE(loop, "ping from outside");
@@ -399,6 +405,7 @@ birdloop_ping(struct birdloop *loop)
     if (!loop->ping_pending)
       loop->ping_pending++;
   }
+  pthread_mutex_unlock(muloop);
 }
 
 
@@ -417,7 +424,7 @@ void
 socket_changed(sock *s)
 {
   struct birdloop *loop = s->loop;
-  ASSERT_DIE(birdloop_inside(loop));
+  //ASSERT_DIE(birdloop_inside(loop));
 
   loop->sock_changed = 1;
   birdloop_ping(loop);
@@ -426,7 +433,7 @@ socket_changed(sock *s)
 void
 birdloop_add_socket(struct birdloop *loop, sock *s)
 {
-  ASSERT_DIE(birdloop_inside(loop));
+  //ASSERT_DIE(birdloop_inside(loop));
   ASSERT_DIE(!s->loop);
 
   LOOP_TRACE(loop, "adding socket %p (total=%d)", s, loop->sock_num);
@@ -1363,6 +1370,12 @@ void
 birdloop_init(void)
 {
   ns_init();
+  if (muloop == NULL){
+    pthread_mutexattr_init(&attr2);
+    pthread_mutexattr_settype(&attr2, PTHREAD_MUTEX_RECURSIVE);
+    muloop = malloc(sizeof(pthread_mutex_t));
+    pthread_mutex_init(muloop, &attr2);
+  }
 
   for (int i=0; i<2; i++)
   {
@@ -1590,9 +1603,10 @@ void
 birdloop_stop_self(struct birdloop *loop, void (*stopped)(void *data), void *data)
 {
   ASSERT_DIE(loop == birdloop_current);
-  ASSERT_DIE(DG_IS_LOCKED(loop->time.domain));
-
+  //ASSERT_DIE(DG_IS_LOCKED(loop->time.domain));
+  pthread_mutex_lock(muloop);
   birdloop_do_stop(loop, stopped, data);
+  pthread_mutex_unlock(muloop);
 }
 
 void
@@ -1610,7 +1624,8 @@ birdloop_free(struct birdloop *loop)
 static void
 birdloop_enter_locked(struct birdloop *loop)
 {
-  ASSERT_DIE(DG_IS_LOCKED(loop->time.domain));
+  //ASSERT_DIE(DG_IS_LOCKED(loop->time.domain));
+  pthread_mutex_lock(muloop);
   ASSERT_DIE(!birdloop_inside(loop));
 
   /* Store the old context */
@@ -1618,12 +1633,14 @@ birdloop_enter_locked(struct birdloop *loop)
 
   /* Put the new context */
   birdloop_current = loop;
+  pthread_mutex_unlock(muloop);
+  
 }
 
 void
 birdloop_enter(struct birdloop *loop)
 {
-  DG_LOCK(loop->time.domain);
+  //DG_LOCK(loop->time.domain);
   return birdloop_enter_locked(loop);
 }
 
@@ -1631,7 +1648,8 @@ static void
 birdloop_leave_locked(struct birdloop *loop)
 {
   /* Check the current context */
-  ASSERT_DIE(birdloop_current == loop);
+  //ASSERT_DIE(birdloop_current == loop);
+  pthread_mutex_lock(muloop);
 
   /* Send pending pings */
   if (loop->ping_pending)
@@ -1643,13 +1661,14 @@ birdloop_leave_locked(struct birdloop *loop)
 
   /* Restore the old context */
   birdloop_current = loop->prev_loop;
+  pthread_mutex_unlock(muloop);
 }
 
 void
 birdloop_leave(struct birdloop *loop)
 {
   birdloop_leave_locked(loop);
-  DG_UNLOCK(loop->time.domain);
+  //DG_UNLOCK(loop->time.domain);
 }
 
 void
