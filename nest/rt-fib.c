@@ -98,15 +98,13 @@
  *
  */
 
-
 #define HASH_DEF_ORDER 10
-#define HASH_HI_MARK * 2
+#define HASH_HI_MARK *2
 #define HASH_HI_STEP 1
 #define HASH_HI_MAX 24
 #define HASH_LO_MARK / 5
 #define HASH_LO_STEP 2
 #define HASH_LO_MIN 10
-
 
 static void
 fib_ht_alloc(struct fib *f)
@@ -132,7 +130,6 @@ fib_ht_free(struct fib_node **h)
   mb_free(h);
 }
 
-
 static inline u32 fib_hash(struct fib *f, const net_addr *a);
 
 /**
@@ -147,8 +144,7 @@ static inline u32 fib_hash(struct fib *f, const net_addr *a);
  *
  * This function initializes a newly allocated FIB and prepares it for use.
  */
-void
-fib_init(struct fib *f, pool *p, uint addr_type, uint node_size, uint node_offset, uint hash_order, fib_init_fn init)
+void fib_init(struct fib *f, pool *p, uint addr_type, uint node_size, uint node_offset, uint hash_order, fib_init_fn init)
 {
   uint addr_length = net_addr_length[addr_type];
 
@@ -165,11 +161,46 @@ fib_init(struct fib *f, pool *p, uint addr_type, uint node_size, uint node_offse
   f->entries = 0;
   f->entries_min = 0;
   f->init = init;
+
+  f->fib_locks = mb_alloc(f->fib_pool, f->hash_size * sizeof(pthread_mutex_t*));
+  for (int i = 0; i < f->hash_size; i++)
+    mb_alloc(f->fib_pool, sizeof(pthread_mutex_t));
+  pthread_mutex_init(&f->memory_lock, NULL);
+  pthread_mutexattr_t Attr;
+  pthread_mutexattr_init(&Attr);
+  pthread_mutexattr_settype(&Attr, PTHREAD_MUTEX_RECURSIVE);
+  for (int i = 0; i < f->hash_size; i++)
+    pthread_mutex_init(f->fib_locks[i], &Attr);
+  atomic_store(&f->resize_lock, 0);
 }
 
 static void
 fib_rehash(struct fib *f, int step)
 {
+
+  for (int i = 0; i < f->hash_size; i++)
+    pthread_mutex_lock(f->fib_locks[i]);
+
+
+  pthread_mutex_t **new_locks = mb_alloc(f->fib_pool, (1 << (f->hash_order + step)) * sizeof(pthread_mutex_t*));
+
+  for (int i = 0; i < f->hash_size; i++)
+    new_locks[i] = f->fib_locks[i];
+  pthread_mutexattr_t Attr;
+  pthread_mutexattr_init(&Attr);
+  pthread_mutexattr_settype(&Attr, PTHREAD_MUTEX_RECURSIVE);
+  for (int i = f->hash_size; i < (1 << (f->hash_order + step)); i++)
+  {
+    new_locks[i] = mb_alloc(f->fib_pool, sizeof(pthread_mutex_t));
+    pthread_mutex_init(new_locks[i], &Attr);
+    pthread_mutex_lock(new_locks[i]);
+  }
+
+  pthread_mutex_t **old_locks = f->fib_locks;
+  f->fib_locks = new_locks;
+
+  mb_free(old_locks);
+
   unsigned old, new, oldn, newn, ni, nh;
   struct fib_node **n, *e, *x, **t, **m, **h;
 
@@ -185,58 +216,83 @@ fib_rehash(struct fib *f, int step)
   ni = 0;
 
   while (oldn--)
+  {
+    x = *h++;
+    while (e = x)
     {
-      x = *h++;
-      while (e = x)
-	{
-	  x = e->next;
-	  nh = fib_hash(f, e->addr);
-	  while (nh > ni)
-	    {
-	      *t = NULL;
-	      ni++;
-	      t = ++n;
-	    }
-	  *t = e;
-	  t = &e->next;
-	}
+      x = e->next;
+      nh = fib_hash(f, e->addr);
+      while (nh > ni)
+      {
+        *t = NULL;
+        ni++;
+        t = ++n;
+      }
+      *t = e;
+      t = &e->next;
     }
+  }
   while (ni < newn)
-    {
-      *t = NULL;
-      ni++;
-      t = ++n;
-    }
+  {
+    *t = NULL;
+    ni++;
+    t = ++n;
+  }
   fib_ht_free(m);
+  for (int i = 0; i < f->hash_size; i++)
+    pthread_mutex_unlock(f->fib_locks[i]);
 }
 
 #define CAST(t) (const net_addr_##t *)
 #define CAST2(t) (net_addr_##t *)
 
-#define FIB_HASH(f,a,t) (net_hash_##t(CAST(t) a) >> f->hash_shift)
+#define FIB_HASH(f, a, t) (net_hash_##t(CAST(t) a) >> f->hash_shift)
 
-#define FIB_FIND(f,a,t)							\
-  ({									\
-    struct fib_node *e = f->hash_table[FIB_HASH(f, a, t)];		\
-    while (e && !net_equal_##t(CAST(t) e->addr, CAST(t) a))		\
-      e = e->next;							\
-    fib_node_to_user(f, e);						\
+#define FIB_FIND(f, a, t)                                     \
+  ({  \
+    u32 key;                                                        \
+    while (1) {                                                    \
+      key = FIB_HASH(f, a, t);                             \
+      pthread_mutex_lock(f->fib_locks[key]);             \
+      u32 newKey = FIB_HASH(f, a, t);                         \
+      if (key == newKey)                                      \
+      {                                                       \
+        break;                                           \
+      }\
+      pthread_mutex_unlock(f->fib_locks[key]);\
+      }                                                       \
+      struct fib_node *e = f->hash_table[key];                \
+      while (e && !net_equal_##t(CAST(t) e->addr, CAST(t) a)) \
+        e = e->next;                                          \
+      pthread_mutex_unlock(f->fib_locks[key]);               \
+      fib_node_to_user(f, e);                                 \
   })
 
-#define FIB_INSERT(f,a,e,t)						\
-  ({									\
-  u32 h = net_hash_##t(CAST(t) a);					\
-  struct fib_node **ee = f->hash_table + (h >> f->hash_shift);		\
-  struct fib_node *g;							\
-									\
-  while ((g = *ee) && (net_hash_##t(CAST(t) g->addr) < h))		\
-    ee = &g->next;							\
-									\
-  net_copy_##t(CAST2(t) e->addr, CAST(t) a);				\
-  e->next = *ee;							\
-  *ee = e;								\
+#define FIB_INSERT(f, a, e, t)                                     \
+  ({                                                               \
+    u32 key;                                                       \
+    while (1){\
+      key = FIB_HASH(f, a, t);                                  \
+          pthread_mutex_lock(f->fib_locks[key]);                  \
+      u32 newKey = FIB_HASH(f, a, t);                              \
+      if (key == newKey)                                           \
+      {                                                            \
+        break;\
+      }\
+      pthread_mutex_unlock(f->fib_locks[key]);                    \
+      }                                                         \
+      u32 h = net_hash_##t(CAST(t) a);                             \
+      struct fib_node **ee = f->hash_table + (h >> f->hash_shift); \
+      struct fib_node *g;                                          \
+                                                                   \
+      while ((g = *ee) && (net_hash_##t(CAST(t) g->addr) < h))     \
+        ee = &g->next;                                             \
+                                                                   \
+      net_copy_##t(CAST2(t) e->addr, CAST(t) a);                   \
+      e->next = *ee;                                               \
+      *ee = e;                                                     \
+      pthread_mutex_unlock(f->fib_locks[key]);                    \
   })
-
 
 static inline u32
 fib_hash(struct fib *f, const net_addr *a)
@@ -250,8 +306,25 @@ fib_get_chain(struct fib *f, const net_addr *a)
 {
   ASSERT(f->addr_type == a->type);
 
+  retry:
+  u32 key = fib_hash(f, a);
+  pthread_mutex_lock(f->fib_locks[key]);
+  u32 newKey = fib_hash(f, a);
+  if (key != newKey)
+  {
+    pthread_mutex_unlock(f->fib_locks[key]);
+    goto retry;
+  }
   struct fib_node *e = f->hash_table[fib_hash(f, a)];
   return e;
+}
+
+
+void unlock_fib_get_chain(struct fib *f, const net_addr *a)
+{
+  ASSERT(f->addr_type == a->type);
+  u32 key = fib_hash(f, a);
+  pthread_mutex_unlock(f->fib_locks[key]);
 }
 
 /**
@@ -269,17 +342,28 @@ fib_find(struct fib *f, const net_addr *a)
 
   switch (f->addr_type)
   {
-  case NET_IP4: return FIB_FIND(f, a, ip4);
-  case NET_IP6: return FIB_FIND(f, a, ip6);
-  case NET_VPN4: return FIB_FIND(f, a, vpn4);
-  case NET_VPN6: return FIB_FIND(f, a, vpn6);
-  case NET_ROA4: return FIB_FIND(f, a, roa4);
-  case NET_ROA6: return FIB_FIND(f, a, roa6);
-  case NET_FLOW4: return FIB_FIND(f, a, flow4);
-  case NET_FLOW6: return FIB_FIND(f, a, flow6);
-  case NET_IP6_SADR: return FIB_FIND(f, a, ip6_sadr);
-  case NET_MPLS: return FIB_FIND(f, a, mpls);
-  default: bug("invalid type");
+  case NET_IP4:
+    return FIB_FIND(f, a, ip4);
+  case NET_IP6:
+    return FIB_FIND(f, a, ip6);
+  case NET_VPN4:
+    return FIB_FIND(f, a, vpn4);
+  case NET_VPN6:
+    return FIB_FIND(f, a, vpn6);
+  case NET_ROA4:
+    return FIB_FIND(f, a, roa4);
+  case NET_ROA6:
+    return FIB_FIND(f, a, roa6);
+  case NET_FLOW4:
+    return FIB_FIND(f, a, flow4);
+  case NET_FLOW6:
+    return FIB_FIND(f, a, flow6);
+  case NET_IP6_SADR:
+    return FIB_FIND(f, a, ip6_sadr);
+  case NET_MPLS:
+    return FIB_FIND(f, a, mpls);
+  default:
+    bug("invalid type");
   }
 }
 
@@ -290,20 +374,40 @@ fib_insert(struct fib *f, const net_addr *a, struct fib_node *e)
 
   switch (f->addr_type)
   {
-  case NET_IP4: FIB_INSERT(f, a, e, ip4); return;
-  case NET_IP6: FIB_INSERT(f, a, e, ip6); return;
-  case NET_VPN4: FIB_INSERT(f, a, e, vpn4); return;
-  case NET_VPN6: FIB_INSERT(f, a, e, vpn6); return;
-  case NET_ROA4: FIB_INSERT(f, a, e, roa4); return;
-  case NET_ROA6: FIB_INSERT(f, a, e, roa6); return;
-  case NET_FLOW4: FIB_INSERT(f, a, e, flow4); return;
-  case NET_FLOW6: FIB_INSERT(f, a, e, flow6); return;
-  case NET_IP6_SADR: FIB_INSERT(f, a, e, ip6_sadr); return;
-  case NET_MPLS: FIB_INSERT(f, a, e, mpls); return;
-  default: bug("invalid type");
+  case NET_IP4:
+    FIB_INSERT(f, a, e, ip4);
+    return;
+  case NET_IP6:
+    FIB_INSERT(f, a, e, ip6);
+    return;
+  case NET_VPN4:
+    FIB_INSERT(f, a, e, vpn4);
+    return;
+  case NET_VPN6:
+    FIB_INSERT(f, a, e, vpn6);
+    return;
+  case NET_ROA4:
+    FIB_INSERT(f, a, e, roa4);
+    return;
+  case NET_ROA6:
+    FIB_INSERT(f, a, e, roa6);
+    return;
+  case NET_FLOW4:
+    FIB_INSERT(f, a, e, flow4);
+    return;
+  case NET_FLOW6:
+    FIB_INSERT(f, a, e, flow6);
+    return;
+  case NET_IP6_SADR:
+    FIB_INSERT(f, a, e, ip6_sadr);
+    return;
+  case NET_MPLS:
+    FIB_INSERT(f, a, e, mpls);
+    return;
+  default:
+    bug("invalid type");
   }
 }
-
 
 /**
  * fib_get - find or create a FIB node
@@ -316,14 +420,33 @@ fib_insert(struct fib *f, const net_addr *a, struct fib_node *e)
 void *
 fib_get(struct fib *f, const net_addr *a)
 {
-  void *b = fib_find(f, a);
-  if (b)
-    return b;
 
+  u32 key;                                                       
+    while (1){
+      key = fib_hash(f, a);                                  
+      pthread_mutex_lock(f->fib_locks[key]);                  
+      u32 newKey = fib_hash(f, a);                              
+      if (key == newKey)                                           
+      {                                                            
+        break;
+      }
+      pthread_mutex_unlock(f->fib_locks[key]);                    
+    }
+
+
+
+  void *b = fib_find(f, a);
+  if (b){
+    pthread_mutex_unlock(f->fib_locks[key]);
+    return b;
+  }
+
+  pthread_mutex_lock(&f->memory_lock);
   if (f->fib_slab)
     b = sl_alloc(f->fib_slab);
   else
     b = mb_alloc(f->fib_pool, f->node_size + a->length);
+  pthread_mutex_unlock(&f->memory_lock);
 
   struct fib_node *e = fib_user_to_node(f, b);
   e->readers = NULL;
@@ -333,9 +456,25 @@ fib_get(struct fib *f, const net_addr *a)
   if (f->init)
     f->init(b);
 
-  if (f->entries++ > f->entries_max)
-    fib_rehash(f, HASH_HI_STEP);
+  uint max_entries = f->entries_max;
 
+  atomic_fetch_add(&f->entries, 1);
+
+  if (atomic_load(&f->entries) > max_entries)
+  {
+    if (!atomic_load(&f->resize_lock))
+    {
+      if (!atomic_exchange(&f->resize_lock, 1))
+      {
+        fib_rehash(f, HASH_HI_STEP);
+        atomic_store(&f->resize_lock, 0);
+      }
+    }
+  }
+
+  pthread_mutex_unlock(f->fib_locks[key]);
+
+  
   return b;
 }
 
@@ -344,7 +483,7 @@ fib_route_ip4(struct fib *f, net_addr_ip4 *n)
 {
   void *r;
 
-  while (!(r = fib_find(f, (net_addr *) n)) && (n->pxlen > 0))
+  while (!(r = fib_find(f, (net_addr *)n)) && (n->pxlen > 0))
   {
     n->pxlen--;
     ip4_clrbit(&n->prefix, n->pxlen);
@@ -358,7 +497,7 @@ fib_route_ip6(struct fib *f, net_addr_ip6 *n)
 {
   void *r;
 
-  while (!(r = fib_find(f, (net_addr *) n)) && (n->pxlen > 0))
+  while (!(r = fib_find(f, (net_addr *)n)) && (n->pxlen > 0))
   {
     n->pxlen--;
     ip6_clrbit(&n->prefix, n->pxlen);
@@ -390,52 +529,51 @@ fib_route(struct fib *f, const net_addr *n)
   case NET_VPN4:
   case NET_ROA4:
   case NET_FLOW4:
-    return fib_route_ip4(f, (net_addr_ip4 *) n0);
+    return fib_route_ip4(f, (net_addr_ip4 *)n0);
 
   case NET_IP6:
   case NET_VPN6:
   case NET_ROA6:
   case NET_FLOW6:
-    return fib_route_ip6(f, (net_addr_ip6 *) n0);
+    return fib_route_ip6(f, (net_addr_ip6 *)n0);
 
   default:
     return NULL;
   }
 }
 
-
 static inline void
 fib_merge_readers(struct fib_iterator *i, struct fib_node *to)
 {
   if (to)
+  {
+    struct fib_iterator *j = to->readers;
+    if (!j)
     {
-      struct fib_iterator *j = to->readers;
-      if (!j)
-	{
-	  /* Fast path */
-	  to->readers = i;
-	  i->prev = (struct fib_iterator *) to;
-	}
-      else
-	{
-	  /* Really merging */
-	  while (j->next)
-	    j = j->next;
-	  j->next = i;
-	  i->prev = j;
-	}
-      while (i && i->node)
-	{
-	  i->node = NULL;
-	  i = i->next;
-	}
+      /* Fast path */
+      to->readers = i;
+      i->prev = (struct fib_iterator *)to;
     }
-  else					/* No more nodes */
+    else
+    {
+      /* Really merging */
+      while (j->next)
+        j = j->next;
+      j->next = i;
+      i->prev = j;
+    }
+    while (i && i->node)
+    {
+      i->node = NULL;
+      i = i->next;
+    }
+  }
+  else /* No more nodes */
     while (i)
-      {
-	i->prev = NULL;
-	i = i->next;
-      }
+    {
+      i->prev = NULL;
+      i = i->next;
+    }
 }
 
 /**
@@ -447,44 +585,62 @@ fib_merge_readers(struct fib_iterator *i, struct fib_node *to)
  * taking care of all the asynchronous readers by shifting
  * them to the next node in the canonical reading order.
  */
-void
-fib_delete(struct fib *f, void *E)
+void fib_delete(struct fib *f, void *E)
 {
   struct fib_node *e = fib_user_to_node(f, E);
-  uint h = fib_hash(f, e->addr);
+  
+retry:
+  u32 h = fib_hash(f, e->addr);
+  u32 key = h;
+
+  pthread_mutex_lock(f->fib_locks[h]);
+  u32 newKey = fib_hash(f, e->addr);
+  if (h != newKey)
+  {
+    pthread_mutex_unlock(f->fib_locks[h]);
+    goto retry;
+  }
+
+
   struct fib_node **ee = f->hash_table + h;
   struct fib_iterator *it;
 
   while (*ee)
+  {
+    if (*ee == e)
     {
-      if (*ee == e)
-	{
-	  *ee = e->next;
-	  if (it = e->readers)
-	    {
-	      struct fib_node *l = e->next;
-	      while (!l)
-		{
-		  h++;
-		  if (h >= f->hash_size)
-		    break;
-		  else
-		    l = f->hash_table[h];
-		}
-	      fib_merge_readers(it, l);
-	    }
+      *ee = e->next;
+      if (it = e->readers)
+      {
+        struct fib_node *l = e->next;
+        while (!l)
+        {
+          h++;
+          if (h >= f->hash_size)
+            break;
+          else
+            l = f->hash_table[h];
+        }
+        if (h != key) pthread_mutex_lock(f->fib_locks[h]);
+        fib_merge_readers(it, l);
+        if (h != key) pthread_mutex_unlock(f->fib_locks[h]);
+      }
 
-	  if (f->fib_slab)
-	    sl_free(f->fib_slab, E);
-	  else
-	    mb_free(E);
+      pthread_mutex_lock(&f->memory_lock);
+      if (f->fib_slab)
+        sl_free(f->fib_slab, E);
+      else
+        mb_free(E);
+      pthread_mutex_unlock(&f->memory_lock);
 
-	  if (f->entries-- < f->entries_min)
-	    fib_rehash(f, -HASH_LO_STEP);
-	  return;
-	}
-      ee = &((*ee)->next);
+      atomic_fetch_sub(&f->entries, 1);
+      // if (f->entries-- < f->entries_min)
+      // fib_rehash(f, -HASH_LO_STEP);
+      pthread_mutex_unlock(f->fib_locks[key]);
+      return;
     }
+    ee = &((*ee)->next);
+  }
   bug("fib_delete() called for invalid node");
 }
 
@@ -495,30 +651,32 @@ fib_delete(struct fib *f, void *E)
  * This function deletes a FIB -- it frees all memory associated
  * with it and all its entries.
  */
-void
-fib_free(struct fib *f)
+void fib_free(struct fib *f)
 {
   fib_ht_free(f->hash_table);
   rfree(f->fib_slab);
 }
 
-void
-fit_init(struct fib_iterator *i, struct fib *f)
+void fit_init(struct fib_iterator *i, struct fib *f)
 {
   unsigned h;
   struct fib_node *n;
 
   i->efef = 0xff;
-  for(h=0; h<f->hash_size; h++)
+  for (h = 0; h < f->hash_size; h++){
+    pthread_mutex_lock(f->fib_locks[h]);
     if (n = f->hash_table[h])
-      {
-	i->prev = (struct fib_iterator *) n;
-	if (i->next = n->readers)
-	  i->next->prev = i;
-	n->readers = i;
-	i->node = n;
-	return;
-      }
+    {
+      i->prev = (struct fib_iterator *)n;
+      if (i->next = n->readers)
+        i->next->prev = i;
+      n->readers = i;
+      i->node = n;
+      pthread_mutex_unlock(f->fib_locks[h]);
+      return;
+    }
+    pthread_mutex_unlock(f->fib_locks[h]);
+  }
   /* The fib is empty, nothing to do */
   i->prev = i->next = NULL;
   i->node = NULL;
@@ -531,19 +689,19 @@ fit_get(struct fib *f, struct fib_iterator *i)
   struct fib_iterator *j, *k;
 
   if (!i->prev)
-    {
-      /* We are at the end */
-      i->hash = ~0 - 1;
-      return NULL;
-    }
+  {
+    /* We are at the end */
+    i->hash = ~0 - 1;
+    return NULL;
+  }
   if (!(n = i->node))
-    {
-      /* No node info available, we are a victim of merging. Try harder. */
-      j = i;
-      while (j->efef == 0xff)
-	j = j->prev;
-      n = (struct fib_node *) j;
-    }
+  {
+    /* No node info available, we are a victim of merging. Try harder. */
+    j = i;
+    while (j->efef == 0xff)
+      j = j->prev;
+    n = (struct fib_node *)j;
+  }
   j = i->prev;
   if (k = i->next)
     k->prev = j;
@@ -552,8 +710,7 @@ fit_get(struct fib *f, struct fib_iterator *i)
   return n;
 }
 
-void
-fit_put(struct fib_iterator *i, struct fib_node *n)
+void fit_put(struct fib_iterator *i, struct fib_node *n)
 {
   struct fib_iterator *j;
 
@@ -562,11 +719,10 @@ fit_put(struct fib_iterator *i, struct fib_node *n)
     j->prev = i;
   i->next = j;
   n->readers = i;
-  i->prev = (struct fib_iterator *) n;
+  i->prev = (struct fib_iterator *)n;
 }
 
-void
-fit_put_next(struct fib *f, struct fib_iterator *i, struct fib_node *n, uint hpos)
+void fit_put_next(struct fib *f, struct fib_iterator *i, struct fib_node *n, uint hpos)
 {
   if (n = n->next)
     goto found;
@@ -584,16 +740,14 @@ found:
   fit_put(i, n);
 }
 
-void
-fit_put_end(struct fib_iterator *i)
+void fit_put_end(struct fib_iterator *i)
 {
   i->prev = i->next = NULL;
   i->node = NULL;
   i->hash = ~0 - 1;
 }
 
-void
-fit_copy(struct fib *f, struct fib_iterator *dst, struct fib_iterator *src)
+void fit_copy(struct fib *f, struct fib_iterator *dst, struct fib_iterator *src)
 {
   struct fib_iterator *nxt = src->next;
 
@@ -617,7 +771,6 @@ fit_copy(struct fib *f, struct fib_iterator *dst, struct fib_iterator *src)
   dst->hash = src->hash;
 }
 
-
 #ifdef DEBUGGING
 
 /**
@@ -627,38 +780,37 @@ fit_copy(struct fib *f, struct fib_iterator *dst, struct fib_iterator *src)
  * This debugging function audits a FIB by checking its internal consistency.
  * Use when you suspect somebody of corrupting innocent data structures.
  */
-void
-fib_check(struct fib *f)
+void fib_check(struct fib *f)
 {
   uint i, ec, nulls;
 
   ec = 0;
-  for(i=0; i<f->hash_size; i++)
+  for (i = 0; i < f->hash_size; i++)
+  {
+    struct fib_node *n;
+    for (n = f->hash_table[i]; n; n = n->next)
     {
-      struct fib_node *n;
-      for(n=f->hash_table[i]; n; n=n->next)
-	{
-	  struct fib_iterator *j, *j0;
-	  uint h0 = fib_hash(f, n->addr);
-	  if (h0 != i)
-	    bug("fib_check: mishashed %x->%x (order %d)", h0, i, f->hash_order);
-	  j0 = (struct fib_iterator *) n;
-	  nulls = 0;
-	  for(j=n->readers; j; j=j->next)
-	    {
-	      if (j->prev != j0)
-		bug("fib_check: iterator->prev mismatch");
-	      j0 = j;
-	      if (!j->node)
-		nulls++;
-	      else if (nulls)
-		bug("fib_check: iterator nullified");
-	      else if (j->node != n)
-		bug("fib_check: iterator->node mismatch");
-	    }
-	  ec++;
-	}
+      struct fib_iterator *j, *j0;
+      uint h0 = fib_hash(f, n->addr);
+      if (h0 != i)
+        bug("fib_check: mishashed %x->%x (order %d)", h0, i, f->hash_order);
+      j0 = (struct fib_iterator *)n;
+      nulls = 0;
+      for (j = n->readers; j; j = j->next)
+      {
+        if (j->prev != j0)
+          bug("fib_check: iterator->prev mismatch");
+        j0 = j;
+        if (!j->node)
+          nulls++;
+        else if (nulls)
+          bug("fib_check: iterator nullified");
+        else if (j->node != n)
+          bug("fib_check: iterator->node mismatch");
+      }
+      ec++;
     }
+  }
   if (ec != f->entries)
     bug("fib_check: invalid entry count (%d != %d)", ec, f->entries);
   return;
@@ -677,9 +829,9 @@ fib_histogram(struct fib *f)
     {
       j = 0;
       for (e = f->hash_table[i]; e != NULL; e = e->next)
-	j++;
+  j++;
       if (j > 0)
-	log(L_WARN "Histogram line %d: %d", i, j);
+  log(L_WARN "Histogram line %d: %d", i, j);
     }
 
   log(L_WARN "Histogram dump end");
@@ -699,18 +851,18 @@ void dump(char *m)
   uint i;
 
   debug("%s ... order=%d, size=%d, entries=%d\n", m, f.hash_order, f.hash_size, f.hash_size);
-  for(i=0; i<f.hash_size; i++)
+  for (i = 0; i < f.hash_size; i++)
+  {
+    struct fib_node *n;
+    struct fib_iterator *j;
+    for (n = f.hash_table[i]; n; n = n->next)
     {
-      struct fib_node *n;
-      struct fib_iterator *j;
-      for(n=f.hash_table[i]; n; n=n->next)
-	{
-	  debug("%04x %08x %p %N", i, ipa_hash(n->prefix), n, n->addr);
-	  for(j=n->readers; j; j=j->next)
-	    debug(" %p[%p]", j, j->node);
-	  debug("\n");
-	}
+      debug("%04x %08x %p %N", i, ipa_hash(n->prefix), n, n->addr);
+      for (j = n->readers; j; j = j->next)
+        debug(" %p[%p]", j, j->node);
+      debug("\n");
     }
+  }
   fib_check(&f);
   debug("-----\n");
 }
@@ -731,12 +883,18 @@ int main(void)
   fib_init(&f, &root_pool, sizeof(struct fib_node), 4, init);
   dump("init");
 
-  a = ipa_from_u32(0x01020304); n = fib_get(&f, &a, 32);
-  a = ipa_from_u32(0x02030405); n = fib_get(&f, &a, 32);
-  a = ipa_from_u32(0x03040506); n = fib_get(&f, &a, 32);
-  a = ipa_from_u32(0x00000000); n = fib_get(&f, &a, 32);
-  a = ipa_from_u32(0x00000c01); n = fib_get(&f, &a, 32);
-  a = ipa_from_u32(0xffffffff); n = fib_get(&f, &a, 32);
+  a = ipa_from_u32(0x01020304);
+  n = fib_get(&f, &a, 32);
+  a = ipa_from_u32(0x02030405);
+  n = fib_get(&f, &a, 32);
+  a = ipa_from_u32(0x03040506);
+  n = fib_get(&f, &a, 32);
+  a = ipa_from_u32(0x00000000);
+  n = fib_get(&f, &a, 32);
+  a = ipa_from_u32(0x00000c01);
+  n = fib_get(&f, &a, 32);
+  a = ipa_from_u32(0xffffffff);
+  n = fib_get(&f, &a, 32);
   dump("fill");
 
   fit_init(&i, &f);
@@ -751,16 +909,16 @@ int main(void)
 next:
   c = 0;
   FIB_ITERATE_START(&f, &i, z)
+  {
+    if (c)
     {
-      if (c)
-	{
-	  FIB_ITERATE_PUT(&i, z);
-	  dump("iter");
-	  goto next;
-	}
-      c = 1;
-      debug("got %p\n", z);
+      FIB_ITERATE_PUT(&i, z);
+      dump("iter");
+      goto next;
     }
+    c = 1;
+    debug("got %p\n", z);
+  }
   FIB_ITERATE_END(z);
   dump("iter end");
 
@@ -774,7 +932,8 @@ next:
   fit_put(&i, n->next);
   dump("iter step 3");
 
-  a = ipa_from_u32(0xffffffff); n = fib_get(&f, &a, 32);
+  a = ipa_from_u32(0xffffffff);
+  n = fib_get(&f, &a, 32);
   fib_delete(&f, n);
   dump("iter step 3");
 
