@@ -136,7 +136,7 @@ ospf_sk_open(struct ospf_iface *ifa)
   sk->flags = SKF_LADDR_RX | (ifa->check_ttl ? SKF_TTL_RX : 0);
   sk->ttl = ifa->cf->ttl_security ? 255 : 1;
 
-  if (sk_open(sk) < 0)
+  if (sk_open(sk, p->p.loop) < 0)
     goto err;
 
   /* 12 is an offset of the checksum in an OSPFv3 packet */
@@ -173,7 +173,7 @@ ospf_sk_open(struct ospf_iface *ifa)
 
  err:
   sk_log_error(sk, p->p.name);
-  rfree(sk);
+  sk_close(sk);
   return 0;
 }
 
@@ -220,7 +220,7 @@ ospf_open_vlink_sk(struct ospf_proto *p)
   sk->data = (void *) p;
   sk->flags = 0;
 
-  if (sk_open(sk) < 0)
+  if (sk_open(sk, p->p.loop) < 0)
     goto err;
 
   /* 12 is an offset of the checksum in an OSPFv3 packet */
@@ -234,7 +234,7 @@ ospf_open_vlink_sk(struct ospf_proto *p)
  err:
   sk_log_error(sk, p->p.name);
   log(L_ERR "%s: Cannot open virtual link socket", p->p.name);
-  rfree(sk);
+  sk_close(sk);
 }
 
 static void
@@ -311,7 +311,7 @@ ospf_iface_remove(struct ospf_iface *ifa)
 
   ospf_iface_sm(ifa, ISM_DOWN);
   rem_node(NODE ifa);
-  rfree(ifa->pool);
+  rp_free(ifa->pool);
 }
 
 void
@@ -484,9 +484,9 @@ ospf_iface_find(struct ospf_proto *p, struct iface *what)
 }
 
 static void
-ospf_iface_add(struct object_lock *lock)
+ospf_iface_add(void *_ifa)
 {
-  struct ospf_iface *ifa = lock->data;
+  struct ospf_iface *ifa = _ifa;
   struct ospf_proto *p = ifa->oa->po;
 
   /* Open socket if interface is not stub */
@@ -522,21 +522,24 @@ static inline void
 add_nbma_node(struct ospf_iface *ifa, struct nbma_node *src, int found)
 {
   struct nbma_node *n = mb_alloc(ifa->pool, sizeof(struct nbma_node));
+
+  n->n = (node) {};
   add_tail(&ifa->nbma_list, NODE n);
+
   n->ip = src->ip;
   n->eligible = src->eligible;
   n->found = found;
 }
 
 static int
-ospf_iface_stubby(struct ospf_iface_patt *ip, struct ifa *addr)
+ospf_iface_stubby(struct ospf_iface_patt *ip, struct ifa *addr, int type)
 {
   /* vlink cannot be stub */
-  if (ip->type == OSPF_IT_VLINK)
+  if (type == OSPF_IT_VLINK)
     return 0;
 
-  /* a host address */
-  if (addr->flags & IA_HOST)
+  /* Host address on Broadcast/NBMA */
+  if (((type == OSPF_IT_BCAST) || (type == OSPF_IT_NBMA)) && (addr->flags & IA_HOST))
     return 1;
 
   /* a loopback iface */
@@ -564,7 +567,7 @@ ospf_iface_new(struct ospf_area *oa, struct ifa *addr, struct ospf_iface_patt *i
     OSPF_TRACE(D_EVENTS, "Adding interface %s (%N) to area %R",
 	       iface->name, &addr->prefix, oa->areaid);
 
-  pool = rp_new(p->p.pool, "OSPF Interface");
+  pool = rp_new(p->p.pool, proto_domain(&p->p), "OSPF Interface");
   ifa = mb_allocz(pool, sizeof(struct ospf_iface));
   ifa->iface = iface;
   ifa->addr = addr;
@@ -584,7 +587,6 @@ ospf_iface_new(struct ospf_area *oa, struct ifa *addr, struct ospf_iface_patt *i
   ifa->strictnbma = ip->strictnbma;
   ifa->waitint = ip->waitint;
   ifa->deadint = ip->deadint;
-  ifa->stub = ospf_iface_stubby(ip, addr);
   ifa->ioprob = OSPF_I_OK;
   ifa->check_link = ip->check_link;
   ifa->ecmp_weight = ip->ecmp_weight;
@@ -598,18 +600,19 @@ ospf_iface_new(struct ospf_area *oa, struct ifa *addr, struct ospf_iface_patt *i
   ifa->tx_length = ifa_tx_length(ifa);
   ifa->tx_hdrlen = ifa_tx_hdrlen(ifa);
 
-  ifa->ptp_netmask = !(addr->flags & IA_PEER);
+  ifa->ptp_netmask = !(addr->flags & (IA_HOST | IA_PEER));
   if (ip->ptp_netmask < 2)
     ifa->ptp_netmask = ip->ptp_netmask;
 
   /* For compatibility, we may use ptp_address even for unnumbered links */
-  ifa->ptp_address = !(addr->flags & IA_PEER) || (p->gr_mode != OSPF_GR_ABLE);
+  ifa->ptp_address = !(addr->flags & (IA_HOST | IA_PEER)) || (p->gr_mode != OSPF_GR_ABLE);
   if (ip->ptp_address < 2)
     ifa->ptp_address = ip->ptp_address;
 
   ifa->drip = ifa->bdrip = ospf_is_v2(p) ? IPA_NONE4 : IPA_NONE6;
 
   ifa->type = ospf_iface_classify(ip->type, addr);
+  ifa->stub = ospf_iface_stubby(ip, addr, ifa->type);
 
   /* Check validity of interface type */
   int old_type = ifa->type;
@@ -647,7 +650,7 @@ ospf_iface_new(struct ospf_area *oa, struct ifa *addr, struct ospf_iface_patt *i
        should be used). Because OSPFv3 iface is not subnet-specific,
        there is no need for ipa_in_net() check */
 
-    if (ospf_is_v2(p) && !ipa_in_netX(nb->ip, &addr->prefix))
+    if (ospf_is_v2(p) && !ospf_ipa_local(nb->ip, addr))
       continue;
 
     if (ospf_is_v3(p) && !ipa_is_link_local(nb->ip))
@@ -665,8 +668,11 @@ ospf_iface_new(struct ospf_area *oa, struct ifa *addr, struct ospf_iface_patt *i
   lock->port = OSPF_PROTO;
   lock->inst = ifa->instance_id;
   lock->iface = iface;
-  lock->data = ifa;
-  lock->hook = ospf_iface_add;
+  lock->event = (event) {
+    .hook = ospf_iface_add,
+    .data = ifa,
+  };
+  lock->target = &global_event_list;
 
   olock_acquire(lock);
 }
@@ -684,7 +690,7 @@ ospf_iface_new_vlink(struct ospf_proto *p, struct ospf_iface_patt *ip)
 
   /* Vlink ifname is stored just after the ospf_iface structure */
 
-  pool = rp_new(p->p.pool, "OSPF Vlink");
+  pool = rp_new(p->p.pool, proto_domain(&p->p), "OSPF Vlink");
   ifa = mb_allocz(pool, sizeof(struct ospf_iface) + 16);
   ifa->oa = p->backbone;
   ifa->cf = ip;
@@ -767,7 +773,7 @@ ospf_iface_reconfigure(struct ospf_iface *ifa, struct ospf_iface_patt *new)
   if (old_type != new_type)
     return 0;
 
-  int new_stub = ospf_iface_stubby(new, ifa->addr);
+  int new_stub = ospf_iface_stubby(new, ifa->addr, new_type);
   if (ifa->stub != new_stub)
     return 0;
 
@@ -929,7 +935,7 @@ ospf_iface_reconfigure(struct ospf_iface *ifa, struct ospf_iface_patt *new)
   WALK_LIST(nb, new->nbma_list)
   {
     /* See related note in ospf_iface_new() */
-    if (ospf_is_v2(p) && !ipa_in_netX(nb->ip, &ifa->addr->prefix))
+    if (ospf_is_v2(p) && !ospf_ipa_local(nb->ip, ifa->addr))
       continue;
 
     if (ospf_is_v3(p) && !ipa_is_link_local(nb->ip))
@@ -1011,7 +1017,7 @@ ospf_iface_reconfigure(struct ospf_iface *ifa, struct ospf_iface_patt *new)
 
   /* PtP netmask */
   int new_ptp_netmask = (new->ptp_netmask < 2) ? new->ptp_netmask :
-    !(ifa->addr->flags & IA_PEER);
+    !(ifa->addr->flags & (IA_HOST | IA_PEER));
   if (ifa->ptp_netmask != new_ptp_netmask)
   {
     OSPF_TRACE(D_EVENTS, "Changing PtP netmask option of %s from %d to %d",
@@ -1021,7 +1027,7 @@ ospf_iface_reconfigure(struct ospf_iface *ifa, struct ospf_iface_patt *new)
 
   /* PtP address */
   int new_ptp_address = (new->ptp_address < 2) ? new->ptp_address :
-    (!(ifa->addr->flags & IA_PEER) || (p->gr_mode != OSPF_GR_ABLE));
+    (!(ifa->addr->flags & (IA_HOST | IA_PEER)) || (p->gr_mode != OSPF_GR_ABLE));
   if (ifa->ptp_address != new_ptp_address)
   {
     /* Keep it silent for implicit changes */
@@ -1219,11 +1225,13 @@ ospf_ifa_notify3(struct proto *P, uint flags, struct ifa *a)
 static void
 ospf_reconfigure_ifaces2(struct ospf_proto *p)
 {
-  struct iface *iface;
   struct ifa *a;
 
-  WALK_LIST(iface, iface_list)
+  IFACE_WALK(iface)
   {
+    if (p->p.vrf && p->p.vrf != iface->master)
+      continue;
+
     if (! (iface->flags & IF_UP))
       continue;
 
@@ -1265,11 +1273,13 @@ ospf_reconfigure_ifaces2(struct ospf_proto *p)
 static void
 ospf_reconfigure_ifaces3(struct ospf_proto *p)
 {
-  struct iface *iface;
   struct ifa *a;
 
-  WALK_LIST(iface, iface_list)
+  IFACE_WALK(iface)
   {
+    if (p->p.vrf && p->p.vrf != iface->master)
+      continue;
+
     if (! (iface->flags & IF_UP))
       continue;
 

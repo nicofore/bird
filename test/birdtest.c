@@ -20,6 +20,8 @@
 
 #include "test/birdtest.h"
 #include "lib/string.h"
+#include "lib/event.h"
+#include "lib/io-loop.h"
 
 #ifdef HAVE_EXECINFO_H
 #include <execinfo.h>
@@ -63,9 +65,12 @@ bt_init(int argc, char *argv[])
 {
   int c;
 
+  /* We have no interest in stdin */
+  close(0);
+
   initstate(BT_RANDOM_SEED, (char *) bt_random_state, sizeof(bt_random_state));
 
-  bt_verbose = 1;
+  bt_verbose = 0;
   bt_filename = argv[0];
   bt_result = 1;
   bt_test_id = NULL;
@@ -119,6 +124,11 @@ bt_init(int argc, char *argv[])
   clock_gettime(CLOCK_MONOTONIC, &bt_begin);
   bt_suite_case_begin = bt_suite_begin = bt_begin;
 
+  the_bird_lock();
+  resource_init();
+  ev_init_list(&global_event_list, &main_birdloop, "Global event list in unit tests");
+  ev_init_list(&global_work_list, &main_birdloop, "Global work list in unit tests");
+  birdloop_init();
   return;
 
  usage:
@@ -171,6 +181,8 @@ int bt_run_test_fn(int (*fn)(const void *), const void *fn_arg, int timeout)
 
   if (!bt_suite_result)
     result = 0;
+
+  tmp_flush();
 
   return result;
 }
@@ -240,7 +252,7 @@ bt_log_result(int result, u64 time, const char *fmt, va_list argptr)
   printf("%s\n", result_str);
 
   if (do_die && !result)
-    abort();
+    exit(1);
 }
 
 static u64
@@ -307,6 +319,12 @@ bt_log_suite_case_result(int result, const char *fmt, ...)
     bt_log_result(result, get_time_diff(&bt_suite_case_begin), fmt, argptr);
     va_end(argptr);
   }
+}
+
+void
+bt_reset_suite_case_timer(void)
+{
+  clock_gettime(CLOCK_MONOTONIC, &bt_suite_case_begin);
 }
 
 int
@@ -501,6 +519,15 @@ bt_fmt_ipa(char *buf, size_t size, const void *data)
     bsnprintf(buf, size, "(null)");
 }
 
+void
+bt_format_net(char *buf, size_t size, const void *data)
+{
+  if (data)
+    bsnprintf(buf, size, "%N", (const net_addr *) data);
+  else
+    bsnprintf(buf, size, "(null)");
+}
+
 int
 bt_is_char(byte c)
 {
@@ -516,6 +543,7 @@ char *bird_name;
 void async_config(void) {}
 void async_dump(void) {}
 void async_shutdown(void) {}
+char *get_hostname(linpool *lp UNUSED) { return NULL; }
 void cmd_check_config(char *name UNUSED) {}
 void cmd_reconfig(char *name UNUSED, int type UNUSED, int timeout UNUSED) {}
 void cmd_reconfig_confirm(void) {}
@@ -529,18 +557,17 @@ void cmd_reconfig_undo_notify(void) {}
 #include "lib/net.h"
 #include "conf/conf.h"
 void sysdep_preconfig(struct config *c UNUSED) {}
-int sysdep_commit(struct config *new UNUSED, struct config *old UNUSED) { return 0; }
+
+void bird_thread_commit(struct config *new, struct config *old);
+int sysdep_commit(struct config *new, struct config *old)
+{
+  bird_thread_commit(new, old);
+  return 0;
+}
+
 void sysdep_shutdown_done(void) {}
 
 #include "nest/cli.h"
 int cli_get_command(cli *c UNUSED) { return 0; }
 void cli_write_trigger(cli *c UNUSED) {}
 cli *cmd_reconfig_stored_cli;
-
-
-void test_launcher(){
-
-    printf("Test launched\n");
-
-}
-

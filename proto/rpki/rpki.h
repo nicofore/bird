@@ -13,7 +13,7 @@
 #define _BIRD_RPKI_H_
 
 #include "nest/bird.h"
-#include "nest/route.h"
+#include "nest/rt.h"
 #include "nest/protocol.h"
 #include "lib/socket.h"
 #include "lib/ip.h"
@@ -83,6 +83,8 @@ const char *rpki_cache_state_to_str(enum rpki_cache_state state);
 void rpki_table_add_roa(struct rpki_cache *cache, struct channel *channel, const net_addr_union *pfxr);
 void rpki_table_remove_roa(struct rpki_cache *cache, struct channel *channel, const net_addr_union *pfxr);
 
+void rpki_start_refresh(struct rpki_proto *p);
+void rpki_stop_refresh(struct rpki_proto *p);
 
 /*
  *	RPKI Protocol Logic
@@ -125,6 +127,7 @@ struct rpki_config {
   u8 keep_refresh_interval:1;		/* Do not overwrite refresh interval by cache server update */
   u8 keep_retry_interval:1;		/* Do not overwrite retry interval by cache server update */
   u8 keep_expire_interval:1;		/* Do not overwrite expire interval by cache server update */
+  u8 ignore_max_length:1;		/* Ignore received max length and use MAX_PREFIX_LENGTH instead */
 };
 
 void rpki_check_config(struct rpki_config *cf);

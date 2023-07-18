@@ -14,11 +14,13 @@ CF_HDR
 #include "conf/conf.h"
 #include "lib/resource.h"
 #include "lib/socket.h"
+#include "lib/settle.h"
 #include "lib/timer.h"
 #include "lib/string.h"
 #include "nest/protocol.h"
 #include "nest/iface.h"
-#include "nest/route.h"
+#include "nest/rt.h"
+#include "nest/bfd.h"
 #include "nest/cli.h"
 #include "filter/filter.h"
 
@@ -63,16 +65,19 @@ CF_DECLS
   const char *t;
   struct rtable_config *r;
   struct channel_config *cc;
+  struct channel *c;
   struct f_inst *x;
   struct {
     struct f_inst *begin, *end;
   } xp;
   enum filter_return fret;
   enum ec_subtype ecs;
-  struct f_dynamic_attr fda;
+  struct ea_class *ea_class;
   struct f_static_attr fsa;
+  struct f_attr_bit fab;
   struct f_lval flv;
   struct f_line *fl;
+  struct f_arg *fa;
   const struct filter *f;
   struct f_tree *e;
   struct f_trie *trie;
@@ -89,7 +94,9 @@ CF_DECLS
   struct proto_spec ps;
   struct channel_limit cl;
   struct timeformat *tf;
-  mpls_label_stack *mls;
+  struct settle_config settle;
+  struct adata *ad;
+  struct bytestring *bs;
 }
 
 %token END CLI_MARKER INVALID_TOKEN ELSECOL DDOT
@@ -101,21 +108,24 @@ CF_DECLS
 %token <i64> VPN_RD
 %token <s> CF_SYM_KNOWN CF_SYM_UNDEFINED
 %token <t> TEXT
+%token <bs> BYTESTRING
 %type <iface> ipa_scope
 
 %type <i> expr bool pxlen4
 %type <time> expr_us time
+%type <settle> settle
 %type <a> ipa
-%type <net> net_ip4_ net_ip6_ net_ip6 net_ip_ net_ip net_or_ipa
+%type <net> net_ip4_ net_ip4 net_ip6_ net_ip6 net_ip_ net_ip net_or_ipa
 %type <net_ptr> net_ net_any net_vpn4_ net_vpn6_ net_vpn_ net_roa4_ net_roa6_ net_roa_ net_ip6_sadr_ net_mpls_
-%type <mls> label_stack_start label_stack
+%type <ad> label_stack_start label_stack
 
 %type <t> text opttext
-%type <s> symbol
+%type <s> symbol symbol_known toksym 
 
 %nonassoc PREFIX_DUMMY
 %left AND OR
 %nonassoc '=' '<' '>' '~' GEQ LEQ NEQ NMA PO PC
+%left '|' '&'
 %left '+' '-'
 %left '*' '/' '%'
 %left '!'
@@ -147,16 +157,16 @@ conf: definition ;
 
 definition:
    DEFINE symbol '=' term ';' {
-     struct f_val *val = cfg_alloc(sizeof(struct f_val));
-     if (f_eval(f_linearize($4), cfg_mem, val) > F_RETURN) cf_error("Runtime error");
-     cf_define_symbol($2, SYM_CONSTANT | val->type, val, val);
+     struct f_val val;
+     if (f_eval(f_linearize($4, 1), &val) > F_RETURN) cf_error("Runtime error");
+     cf_define_symbol($2, SYM_CONSTANT | val.type, val, lp_val_copy(cfg_mem, &val));
    }
  ;
 
 expr:
    NUM
- | '(' term ')' { $$ = f_eval_int(f_linearize($2)); }
- | CF_SYM_KNOWN {
+ | '(' term ')' { $$ = f_eval_int(f_linearize($2, 1)); }
+ | symbol_known {
      if ($1->class != (SYM_CONSTANT | T_INT)) cf_error("Number constant expected");
      $$ = SYM_VAL($1).i; }
  ;
@@ -167,7 +177,9 @@ expr_us:
  | expr US { $$ = $1 US_; }
  ;
 
-symbol: CF_SYM_UNDEFINED | CF_SYM_KNOWN ;
+toksym: FROM | PREFERENCE ;
+symbol: CF_SYM_UNDEFINED | CF_SYM_KNOWN | toksym ;
+symbol_known: CF_SYM_KNOWN | toksym ;
 
 /* Switches */
 
@@ -299,6 +311,15 @@ net_:
 
 /* Networks - regular */
 
+net_ip4:
+   net_ip4_
+ | CF_SYM_KNOWN {
+     if (($1->class != (SYM_CONSTANT | T_NET)) || (SYM_VAL($1).net->type != NET_IP4))
+       cf_error("IPv4 network constant expected");
+     $$ = * SYM_VAL($1).net;
+   }
+ ;
+
 net_ip6:
    net_ip6_
  | CF_SYM_KNOWN {
@@ -343,17 +364,19 @@ net_or_ipa:
 
 label_stack_start: NUM
 {
-  $$ = cfg_allocz(sizeof(mpls_label_stack));
-  $$->len = 1;
-  $$->stack[0] = $1;
+  $$ = cfg_allocz(ADATA_SIZE(MPLS_MAX_LABEL_STACK * sizeof(u32)));
+  $$->length = sizeof(u32);
+  *((u32 *)$$->data) = $1;
 };
 
 label_stack:
     label_stack_start
   | label_stack '/' NUM {
-    if ($1->len >= MPLS_MAX_LABEL_STACK)
+    if ($1->length >= MPLS_MAX_LABEL_STACK * sizeof(u32))
       cf_error("Too many labels in stack");
-    $1->stack[$1->len++] = $3;
+
+    *((u32 *)($$->data + $1->length)) = $3;
+    $1->length += sizeof(u32);
     $$ = $1;
   }
 ;
@@ -365,6 +388,13 @@ time:
        cf_error("Invalid date/time");
    }
  ;
+
+/* Settle timer configuration */
+settle: expr_us expr_us {
+  if ($1 > $2) cf_error("Minimum settle time %t is bigger than maximum settle time %t", $1, $2);
+  $$.min = $1;
+  $$.max = $2;
+};
 
 text:
    TEXT

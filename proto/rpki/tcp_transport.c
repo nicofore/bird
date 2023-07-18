@@ -28,7 +28,7 @@ rpki_tr_tcp_open(struct rpki_tr_sock *tr)
 
   sk->type = SK_TCP_ACTIVE;
 
-  if (sk_open(sk) != 0)
+  if (sk_open(sk, tr->cache->p->p.loop) != 0)
     return RPKI_TR_ERROR;
 
   return RPKI_TR_SUCCESS;
@@ -43,24 +43,12 @@ rpki_tr_tcp_ident(struct rpki_tr_sock *tr)
   if (tr->ident != NULL)
     return tr->ident;
 
-  const char *host = cf->hostname;
-  ip_addr ip = cf->ip;
-  u16 port = cf->port;
-
-  size_t colon_and_port_len = 6; /* max ":65535" */
-  size_t ident_len;
-  if (host)
-    ident_len = strlen(host) + colon_and_port_len + 1;
-  else
-    ident_len = IPA_MAX_TEXT_LENGTH + colon_and_port_len + 1;
-
-  char *ident = mb_alloc(cache->pool, ident_len);
-  if (host)
-    bsnprintf(ident, ident_len, "%s:%u", host, port);
-  else
-    bsnprintf(ident, ident_len, "%I:%u", ip, port);
-
+  /* Length: <host> + ':' + <port> + '\0' */
+  size_t len = strlen(cf->hostname) + 1 + 5 + 1;
+  char *ident = mb_alloc(cache->pool, len);
+  bsnprintf(ident, len, "%s:%u", cf->hostname, cf->port);
   tr->ident = ident;
+
   return tr->ident;
 }
 

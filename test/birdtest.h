@@ -32,6 +32,7 @@ extern const char *bt_test_id;
 
 void bt_init(int argc, char *argv[]);
 int  bt_exit_value(void);
+void bt_reset_suite_case_timer(void);
 int bt_test_suite_base(int (*test_fn)(const void *), const char *test_id, const void *test_fn_argument, int forked, int timeout, const char *dsc, ...);
 static inline u64 bt_random(void)
 { return ((u64) random() & 0xffffffff) | ((u64) random() << 32); }
@@ -39,7 +40,7 @@ static inline u64 bt_random(void)
 void bt_log_suite_result(int result, const char *fmt, ...);
 void bt_log_suite_case_result(int result, const char *fmt, ...);
 
-#define BT_TIMEOUT 			5	/* Default timeout in seconds */
+#define BT_TIMEOUT 			60	/* Default timeout in seconds */
 #define BT_FORKING 			1	/* Forking is enabled in default */
 
 #define BT_RANDOM_SEED 			0x5097d2bb
@@ -165,6 +166,8 @@ struct bt_batch {
 void bt_fmt_str(char *buf, size_t size, const void *data);
 void bt_fmt_unsigned(char *buf, size_t size, const void *data);
 void bt_fmt_ipa(char *buf, size_t size, const void *data);
+void bt_format_net(char *buf, size_t size, const void *data);
+
 int bt_assert_batch__(struct bt_batch *opts);
 int bt_is_char(byte c);
 
@@ -178,7 +181,5 @@ int bt_is_char(byte c);
     .out_fmt = out_fmt__,						\
     .out_buf = bt_out_fmt_buf,	/* Global memory for this usage */	\
   })
-
-void test_launcher();
 
 #endif /* _BIRDTEST_H_ */

@@ -106,13 +106,12 @@
 
 #include <stdlib.h>
 #include "ospf.h"
+#include "lib/macro.h"
 
-static int ospf_preexport(struct proto *P, rte **new, struct linpool *pool);
-static void ospf_make_tmp_attrs(struct rte *rt, struct linpool *pool);
-static void ospf_store_tmp_attrs(struct rte *rt, struct linpool *pool);
+static int ospf_preexport(struct channel *C, rte *new);
 static void ospf_reload_routes(struct channel *C);
-static int ospf_rte_better(struct rte *new, struct rte *old);
-static int ospf_rte_same(struct rte *new, struct rte *old);
+static int ospf_rte_better(const rte *new, const rte *old);
+static u32 ospf_rte_igp_metric(const rte *rt);
 static void ospf_disp(timer *timer);
 
 
@@ -301,7 +300,7 @@ ospf_start(struct proto *P)
   p->lsab_size = 256;
   p->lsab_used = 0;
   p->lsab = mb_alloc(P->pool, p->lsab_size);
-  p->nhpool = lp_new(P->pool, 12*sizeof(struct nexthop));
+  p->nhpool = lp_new(P->pool);
   init_list(&(p->iface_list));
   init_list(&(p->area_list));
   fib_init(&p->rtf, P->pool, ospf_get_af(p), sizeof(ort), OFFSETOF(ort, fn), 0, NULL);
@@ -372,53 +371,56 @@ ospf_init(struct proto_config *CF)
   P->main_channel = proto_add_channel(P, proto_cf_main_channel(CF));
 
   P->rt_notify = ospf_rt_notify;
-  P->if_notify = ospf_if_notify;
-  P->ifa_notify = cf->ospf2 ? ospf_ifa_notify2 : ospf_ifa_notify3;
+  P->iface_sub.if_notify = ospf_if_notify;
+  P->iface_sub.ifa_notify = cf->ospf2 ? ospf_ifa_notify2 : ospf_ifa_notify3;
   P->preexport = ospf_preexport;
   P->reload_routes = ospf_reload_routes;
   P->feed_begin = ospf_feed_begin;
   P->feed_end = ospf_feed_end;
-  P->make_tmp_attrs = ospf_make_tmp_attrs;
-  P->store_tmp_attrs = ospf_store_tmp_attrs;
-  P->rte_better = ospf_rte_better;
-  P->rte_same = ospf_rte_same;
+
+  P->sources.class = &ospf_rte_owner_class;
 
   return P;
 }
 
 /* If new is better return 1 */
 static int
-ospf_rte_better(struct rte *new, struct rte *old)
+ospf_rte_better(const rte *new, const rte *old)
 {
-  if (new->u.ospf.metric1 == LSINFINITY)
+  u32 new_metric1 = ea_get_int(new->attrs, &ea_ospf_metric1, LSINFINITY);
+
+  if (new_metric1 == LSINFINITY)
     return 0;
 
-  if(new->attrs->source < old->attrs->source) return 1;
-  if(new->attrs->source > old->attrs->source) return 0;
+  u32 ns = rt_get_source_attr(new);
+  u32 os = rt_get_source_attr(old);
 
-  if(new->attrs->source == RTS_OSPF_EXT2)
+  if (ns < os) return 1;
+  if (ns > os) return 0;
+
+  if (ns == RTS_OSPF_EXT2)
   {
-    if(new->u.ospf.metric2 < old->u.ospf.metric2) return 1;
-    if(new->u.ospf.metric2 > old->u.ospf.metric2) return 0;
+    u32 old_metric2 = ea_get_int(old->attrs, &ea_ospf_metric2, LSINFINITY);
+    u32 new_metric2 = ea_get_int(new->attrs, &ea_ospf_metric2, LSINFINITY);
+    if (new_metric2 < old_metric2) return 1;
+    if (new_metric2 > old_metric2) return 0;
   }
 
-  if (new->u.ospf.metric1 < old->u.ospf.metric1)
+  u32 old_metric1 = ea_get_int(old->attrs, &ea_ospf_metric1, LSINFINITY);
+  if (new_metric1 < old_metric1)
     return 1;
 
   return 0;			/* Old is shorter or same */
 }
 
-static int
-ospf_rte_same(struct rte *new, struct rte *old)
+static u32
+ospf_rte_igp_metric(const rte *rt)
 {
-  /* new->attrs == old->attrs always */
-  return
-    new->u.ospf.metric1 == old->u.ospf.metric1 &&
-    new->u.ospf.metric2 == old->u.ospf.metric2 &&
-    new->u.ospf.tag == old->u.ospf.tag &&
-    new->u.ospf.router_id == old->u.ospf.router_id;
-}
+  if (rt_get_source_attr(rt) == RTS_OSPF_EXT2)
+    return IGP_METRIC_UNKNOWN;
 
+  return ea_get_int(rt->attrs, &ea_ospf_metric1, LSINFINITY);
+}
 
 void
 ospf_schedule_rtcalc(struct ospf_proto *p)
@@ -484,14 +486,13 @@ ospf_disp(timer * timer)
  * import to the filters.
  */
 static int
-ospf_preexport(struct proto *P, rte **new, struct linpool *pool UNUSED)
+ospf_preexport(struct channel *C, rte *e)
 {
-  struct ospf_proto *p = (struct ospf_proto *) P;
+  struct ospf_proto *p = (struct ospf_proto *) C->proto;
   struct ospf_area *oa = ospf_main_area(p);
-  rte *e = *new;
 
   /* Reject our own routes */
-  if (e->attrs->src->proto == P)
+  if (e->sender == C->in_req.hook)
     return -1;
 
   /* Do not export routes to stub areas */
@@ -499,26 +500,6 @@ ospf_preexport(struct proto *P, rte **new, struct linpool *pool UNUSED)
     return -1;
 
   return 0;
-}
-
-static void
-ospf_make_tmp_attrs(struct rte *rt, struct linpool *pool)
-{
-  rte_init_tmp_attrs(rt, pool, 4);
-  rte_make_tmp_attr(rt, EA_OSPF_METRIC1, EAF_TYPE_INT, rt->u.ospf.metric1);
-  rte_make_tmp_attr(rt, EA_OSPF_METRIC2, EAF_TYPE_INT, rt->u.ospf.metric2);
-  rte_make_tmp_attr(rt, EA_OSPF_TAG, EAF_TYPE_INT, rt->u.ospf.tag);
-  rte_make_tmp_attr(rt, EA_OSPF_ROUTER_ID, EAF_TYPE_ROUTER_ID, rt->u.ospf.router_id);
-}
-
-static void
-ospf_store_tmp_attrs(struct rte *rt, struct linpool *pool)
-{
-  rte_init_tmp_attrs(rt, pool, 4);
-  rt->u.ospf.metric1 = rte_store_tmp_attr(rt, EA_OSPF_METRIC1);
-  rt->u.ospf.metric2 = rte_store_tmp_attr(rt, EA_OSPF_METRIC2);
-  rt->u.ospf.tag = rte_store_tmp_attr(rt, EA_OSPF_TAG);
-  rt->u.ospf.router_id = rte_store_tmp_attr(rt, EA_OSPF_ROUTER_ID);
 }
 
 /**
@@ -554,9 +535,12 @@ ospf_shutdown(struct proto *P)
   /* Cleanup locked rta entries */
   FIB_WALK(&p->rtf, ort, nf)
   {
-    rta_free(nf->old_rta);
+    ea_free(nf->old_ea);
   }
   FIB_WALK_END;
+
+  if (tm_active(p->disp_timer))
+    tm_stop(p->disp_timer);
 
   return PS_DOWN;
 }
@@ -586,11 +570,12 @@ ospf_get_status(struct proto *P, byte * buf)
 }
 
 static void
-ospf_get_route_info(rte * rte, byte * buf)
+ospf_get_route_info(const rte * rte, byte * buf)
 {
   char *type = "<bug>";
 
-  switch (rte->attrs->source)
+  uint source = rt_get_source_attr(rte);
+  switch (source)
   {
   case RTS_OSPF:
     type = "I";
@@ -607,38 +592,26 @@ ospf_get_route_info(rte * rte, byte * buf)
   }
 
   buf += bsprintf(buf, " %s", type);
-  buf += bsprintf(buf, " (%d/%d", rte->pref, rte->u.ospf.metric1);
-  if (rte->attrs->source == RTS_OSPF_EXT2)
-    buf += bsprintf(buf, "/%d", rte->u.ospf.metric2);
+  buf += bsprintf(buf, " (%d/%d", rt_get_preference(rte), ea_get_int(rte->attrs, &ea_ospf_metric1, LSINFINITY));
+  if (source == RTS_OSPF_EXT2)
+    buf += bsprintf(buf, "/%d", ea_get_int(rte->attrs, &ea_ospf_metric2, LSINFINITY));
   buf += bsprintf(buf, ")");
-  if ((rte->attrs->source == RTS_OSPF_EXT1 || rte->attrs->source == RTS_OSPF_EXT2) && rte->u.ospf.tag)
+  if (source == RTS_OSPF_EXT1 || source == RTS_OSPF_EXT2)
   {
-    buf += bsprintf(buf, " [%x]", rte->u.ospf.tag);
+    eattr *ea = ea_find(rte->attrs, &ea_ospf_tag);
+    if (ea && (ea->u.data > 0))
+      buf += bsprintf(buf, " [%x]", ea->u.data);
   }
-  if (rte->u.ospf.router_id)
-    buf += bsprintf(buf, " [%R]", rte->u.ospf.router_id);
+  
+  eattr *ea = ea_find(rte->attrs, &ea_ospf_router_id);
+  if (ea)
+    buf += bsprintf(buf, " [%R]", ea->u.data);
 }
 
-static int
-ospf_get_attr(const eattr * a, byte * buf, int buflen UNUSED)
+static void
+ospf_tag_format(const eattr * a, byte * buf, uint buflen)
 {
-  switch (a->id)
-  {
-  case EA_OSPF_METRIC1:
-    bsprintf(buf, "metric1");
-    return GA_NAME;
-  case EA_OSPF_METRIC2:
-    bsprintf(buf, "metric2");
-    return GA_NAME;
-  case EA_OSPF_TAG:
-    bsprintf(buf, "tag: 0x%08x", a->u.data);
-    return GA_FULL;
-  case EA_OSPF_ROUTER_ID:
-    bsprintf(buf, "router_id");
-    return GA_NAME;
-  default:
-    return GA_UNKNOWN;
-  }
+  bsnprintf(buf, buflen, "0x%08x", a->u.data);
 }
 
 static void
@@ -1533,10 +1506,15 @@ ospf_sh_lsadb(struct lsadb_show_data *ld)
 }
 
 
+struct rte_owner_class ospf_rte_owner_class = {
+  .get_route_info =	ospf_get_route_info,
+  .rte_better =		ospf_rte_better,
+  .rte_igp_metric =	ospf_rte_igp_metric,
+};
+
 struct protocol proto_ospf = {
   .name =		"OSPF",
   .template =		"ospf%d",
-  .class =		PROTOCOL_OSPF,
   .preference =		DEF_PREF_OSPF,
   .channel_mask =	NB_IP,
   .proto_size =		sizeof(struct ospf_proto),
@@ -1547,6 +1525,38 @@ struct protocol proto_ospf = {
   .shutdown =		ospf_shutdown,
   .reconfigure =	ospf_reconfigure,
   .get_status =		ospf_get_status,
-  .get_attr =		ospf_get_attr,
-  .get_route_info =	ospf_get_route_info
 };
+
+struct ea_class ea_ospf_metric1 = {
+  .name = "ospf_metric1",
+  .type = T_INT,
+};
+
+struct ea_class ea_ospf_metric2 = {
+  .name = "ospf_metric2",
+  .type = T_INT,
+};
+
+struct ea_class ea_ospf_tag = {
+  .name = "ospf_tag",
+  .type = T_INT,
+  .format = ospf_tag_format,
+};
+
+struct ea_class ea_ospf_router_id = {
+  .name = "ospf_router_id",
+  .type = T_QUAD,
+};
+
+void
+ospf_build(void)
+{
+  proto_build(&proto_ospf);
+
+  EA_REGISTER_ALL(
+      &ea_ospf_metric1,
+      &ea_ospf_metric2,
+      &ea_ospf_tag,
+      &ea_ospf_router_id
+  );
+}

@@ -36,12 +36,14 @@
 #include "lib/resource.h"
 #include "lib/socket.h"
 #include "lib/event.h"
+#include "lib/locking.h"
 #include "lib/timer.h"
 #include "lib/string.h"
 #include "nest/iface.h"
 #include "conf/conf.h"
 
 #include "sysdep/unix/unix.h"
+#include "sysdep/unix/io-loop.h"
 #include CONFIG_INCLUDE_SYSIO_H
 
 /* Maximum number of calls of tx handler for one socket in one
@@ -74,7 +76,7 @@ rf_free(resource *r)
 }
 
 static void
-rf_dump(resource *r)
+rf_dump(resource *r, unsigned indent UNUSED)
 {
   struct rfile *a = (struct rfile *) r;
 
@@ -122,11 +124,15 @@ rf_fileno(struct rfile *f)
 
 btime boot_time;
 
+
 void
-times_init(struct timeloop *loop)
+times_update(void)
 {
   struct timespec ts;
   int rv;
+
+  btime old_time = current_time();
+  btime old_real_time = current_real_time();
 
   rv = clock_gettime(CLOCK_MONOTONIC, &ts);
   if (rv < 0)
@@ -135,42 +141,33 @@ times_init(struct timeloop *loop)
   if ((ts.tv_sec < 0) || (((u64) ts.tv_sec) > ((u64) 1 << 40)))
     log(L_WARN "Monotonic clock is crazy");
 
-  loop->last_time = ts.tv_sec S + ts.tv_nsec NS;
-  loop->real_time = 0;
-}
-
-void
-times_update(struct timeloop *loop)
-{
-  struct timespec ts;
-  int rv;
-
-  rv = clock_gettime(CLOCK_MONOTONIC, &ts);
-  if (rv < 0)
-    die("clock_gettime: %m");
-
   btime new_time = ts.tv_sec S + ts.tv_nsec NS;
 
-  if (new_time < loop->last_time)
+  if (new_time < old_time)
     log(L_ERR "Monotonic clock is broken");
-
-  loop->last_time = new_time;
-  loop->real_time = 0;
-}
-
-void
-times_update_real_time(struct timeloop *loop)
-{
-  struct timespec ts;
-  int rv;
 
   rv = clock_gettime(CLOCK_REALTIME, &ts);
   if (rv < 0)
     die("clock_gettime: %m");
 
-  loop->real_time = ts.tv_sec S + ts.tv_nsec NS;
-}
+  btime new_real_time = ts.tv_sec S + ts.tv_nsec NS;
 
+  if (!atomic_compare_exchange_strong_explicit(
+      &last_time,
+      &old_time,
+      new_time,
+      memory_order_acq_rel,
+      memory_order_relaxed))
+    DBG("Time update collision: last_time");
+
+  if (!atomic_compare_exchange_strong_explicit(
+      &real_time,
+      &old_real_time,
+      new_real_time,
+      memory_order_acq_rel,
+      memory_order_relaxed))
+    DBG("Time update collision: real_time");
+}
 
 /**
  * DOC: Sockets
@@ -725,11 +722,7 @@ sk_log_error(sock *s, const char *p)
  *	Actual struct birdsock code
  */
 
-static list sock_list;
-static struct birdsock *current_sock;
-static struct birdsock *stored_sock;
-
-static inline sock *
+sock *
 sk_next(sock *s)
 {
   if (!s->n.next->next)
@@ -777,8 +770,7 @@ sk_ssh_free(sock *s)
 
   if (ssh->channel)
   {
-    if (ssh_channel_is_open(ssh->channel))
-      ssh_channel_close(ssh->channel);
+    ssh_channel_close(ssh->channel);
     ssh_channel_free(ssh->channel);
     ssh->channel = NULL;
   }
@@ -792,6 +784,7 @@ sk_ssh_free(sock *s)
 }
 #endif
 
+
 static void
 sk_free(resource *r)
 {
@@ -804,20 +797,10 @@ sk_free(resource *r)
     sk_ssh_free(s);
 #endif
 
-  if (s->fd < 0)
-    return;
+  if (s->loop)
+    birdloop_remove_socket(s->loop, s);
 
-  /* FIXME: we should call sk_stop() for SKF_THREAD sockets */
-  if (!(s->flags & SKF_THREAD))
-  {
-    if (s == current_sock)
-      current_sock = sk_next(s);
-    if (s == stored_sock)
-      stored_sock = sk_next(s);
-    rem_node(&s->n);
-  }
-
-  if (s->type != SK_SSH && s->type != SK_SSH_ACTIVE)
+  if (s->fd >= 0 && s->type != SK_SSH && s->type != SK_SSH_ACTIVE)
     close(s->fd);
 
   s->fd = -1;
@@ -868,7 +851,7 @@ sk_reallocate(sock *s)
 }
 
 static void
-sk_dump(resource *r)
+sk_dump(resource *r, unsigned indent UNUSED)
 {
   sock *s = (sock *) r;
   static char *sk_type_names[] = { "TCP<", "TCP>", "TCP", "UDP", NULL, "IP", NULL, "MAGIC", "UNIX<", "UNIX", "SSH>", "SSH", "DEL!" };
@@ -1030,12 +1013,6 @@ sk_setup(sock *s)
 }
 
 static void
-sk_insert(sock *s)
-{
-  add_tail(&sock_list, &s->n);
-}
-
-static void
 sk_tcp_connected(sock *s)
 {
   sockaddr sa;
@@ -1075,6 +1052,10 @@ sk_passive_connected(sock *s, int type)
     return 0;
   }
 
+  struct domain_generic *sock_lock = DG_IS_LOCKED(s->pool->domain) ? NULL : s->pool->domain;
+  if (sock_lock)
+    DG_LOCK(sock_lock);
+
   sock *t = sk_new(s->pool);
   t->type = type;
   t->data = s->data;
@@ -1104,13 +1085,21 @@ sk_passive_connected(sock *s, int type)
     /* FIXME: handle it better in rfree() */
     close(t->fd);
     t->fd = -1;
-    rfree(t);
-    return 1;
+    sk_close(t);
+    t = NULL;
+  }
+  else
+  {
+    birdloop_add_socket(s->loop, t);
+    sk_alloc_bufs(t);
   }
 
-  sk_insert(t);
-  sk_alloc_bufs(t);
-  s->rx_hook(t, 0);
+  if (sock_lock)
+    DG_UNLOCK(sock_lock);
+
+  if (t)
+    s->rx_hook(t, 0);
+
   return 1;
 }
 
@@ -1153,34 +1142,45 @@ sk_ssh_connect(sock *s)
     {
       int server_identity_is_ok = 1;
 
+#ifdef HAVE_SSH_OLD_SERVER_VALIDATION_API
+#define ssh_session_is_known_server	ssh_is_server_known
+#define SSH_KNOWN_HOSTS_OK		SSH_SERVER_KNOWN_OK
+#define SSH_KNOWN_HOSTS_UNKNOWN		SSH_SERVER_NOT_KNOWN
+#define SSH_KNOWN_HOSTS_CHANGED		SSH_SERVER_KNOWN_CHANGED
+#define SSH_KNOWN_HOSTS_NOT_FOUND	SSH_SERVER_FILE_NOT_FOUND
+#define SSH_KNOWN_HOSTS_ERROR		SSH_SERVER_ERROR
+#define SSH_KNOWN_HOSTS_OTHER		SSH_SERVER_FOUND_OTHER
+#endif
+
       /* Check server identity */
-      switch (ssh_is_server_known(s->ssh->session))
+      switch (ssh_session_is_known_server(s->ssh->session))
       {
 #define LOG_WARN_ABOUT_SSH_SERVER_VALIDATION(s,msg,args...) log(L_WARN "SSH Identity %s@%s:%u: " msg, (s)->ssh->username, (s)->host, (s)->dport, ## args);
-      case SSH_SERVER_KNOWN_OK:
+      case SSH_KNOWN_HOSTS_OK:
 	/* The server is known and has not changed. */
 	break;
 
-      case SSH_SERVER_NOT_KNOWN:
+      case SSH_KNOWN_HOSTS_UNKNOWN:
 	LOG_WARN_ABOUT_SSH_SERVER_VALIDATION(s, "The server is unknown, its public key was not found in the known host file %s", s->ssh->server_hostkey_path);
+	server_identity_is_ok = 0;
 	break;
 
-      case SSH_SERVER_KNOWN_CHANGED:
+      case SSH_KNOWN_HOSTS_CHANGED:
 	LOG_WARN_ABOUT_SSH_SERVER_VALIDATION(s, "The server key has changed. Either you are under attack or the administrator changed the key.");
 	server_identity_is_ok = 0;
 	break;
 
-      case SSH_SERVER_FILE_NOT_FOUND:
+      case SSH_KNOWN_HOSTS_NOT_FOUND:
 	LOG_WARN_ABOUT_SSH_SERVER_VALIDATION(s, "The known host file %s does not exist", s->ssh->server_hostkey_path);
 	server_identity_is_ok = 0;
 	break;
 
-      case SSH_SERVER_ERROR:
+      case SSH_KNOWN_HOSTS_ERROR:
 	LOG_WARN_ABOUT_SSH_SERVER_VALIDATION(s, "Some error happened");
 	server_identity_is_ok = 0;
 	break;
 
-      case SSH_SERVER_FOUND_OTHER:
+      case SSH_KNOWN_HOSTS_OTHER:
 	LOG_WARN_ABOUT_SSH_SERVER_VALIDATION(s, "The server gave use a key of a type while we had an other type recorded. " \
 					     "It is a possible attack.");
 	server_identity_is_ok = 0;
@@ -1311,6 +1311,7 @@ sk_open_ssh(sock *s)
 
 /**
  * sk_open - open a socket
+ * @loop: loop
  * @s: socket
  *
  * This function takes a socket resource created by sk_new() and
@@ -1320,7 +1321,7 @@ sk_open_ssh(sock *s)
  * Result: 0 for success, -1 for an error.
  */
 int
-sk_open(sock *s)
+sk_open(sock *s, struct birdloop *loop)
 {
   int af = AF_UNSPEC;
   int fd = -1;
@@ -1436,6 +1437,10 @@ sk_open(sock *s)
 	if (sk_set_high_port(s) < 0)
 	  log(L_WARN "Socket error: %s%#m", s->err);
 
+    if (s->flags & SKF_FREEBIND)
+      if (sk_set_freebind(s) < 0)
+        log(L_WARN "Socket error: %s%#m", s->err);
+
     sockaddr_fill(&sa, s->af, bind_addr, s->iface, bind_port);
     if (bind(fd, &sa.sa, SA_LEN(sa)) < 0)
       ERR2("bind");
@@ -1469,9 +1474,7 @@ sk_open(sock *s)
     sk_alloc_bufs(s);
   }
 
-  if (!(s->flags & SKF_THREAD))
-    sk_insert(s);
-
+  birdloop_add_socket(loop, s);
   return 0;
 
 err:
@@ -1481,7 +1484,7 @@ err:
 }
 
 int
-sk_open_unix(sock *s, char *name)
+sk_open_unix(sock *s, struct birdloop *loop, char *name)
 {
   struct sockaddr_un sa;
   int fd;
@@ -1508,7 +1511,7 @@ sk_open_unix(sock *s, char *name)
     return -1;
 
   s->fd = fd;
-  sk_insert(s);
+  birdloop_add_socket(loop, s);
   return 0;
 }
 
@@ -1634,6 +1637,13 @@ sk_recvmsg(sock *s)
 
 static inline void reset_tx_buffer(sock *s) { s->ttx = s->tpos = s->tbuf; }
 
+_Bool
+sk_tx_pending(sock *s)
+{
+  return s->ttx != s->tpos;
+}
+
+
 static int
 sk_maybe_write(sock *s)
 {
@@ -1644,7 +1654,7 @@ sk_maybe_write(sock *s)
   case SK_TCP:
   case SK_MAGIC:
   case SK_UNIX:
-    while (s->ttx != s->tpos)
+    while (sk_tx_pending(s))
     {
       e = write(s->fd, s->ttx, s->tpos - s->ttx);
 
@@ -1666,7 +1676,7 @@ sk_maybe_write(sock *s)
 
 #ifdef HAVE_LIBSSH
   case SK_SSH:
-    while (s->ttx != s->tpos)
+    while (sk_tx_pending(s))
     {
       e = ssh_channel_write(s->ssh->channel, s->ttx, s->tpos - s->ttx);
 
@@ -1749,7 +1759,12 @@ sk_send(sock *s, unsigned len)
 {
   s->ttx = s->tbuf;
   s->tpos = s->tbuf + len;
-  return sk_maybe_write(s);
+
+  int e = sk_maybe_write(s);
+  if (e == 0) /* Trigger thread poll reload to poll this socket's write. */
+    socket_changed(s);
+
+  return e;
 }
 
 /**
@@ -1796,7 +1811,7 @@ call_rx_hook(sock *s, int size)
   if (s->rx_hook(s, size))
   {
     /* We need to be careful since the socket could have been deleted by the hook */
-    if (current_sock == s)
+    if (s->loop->sock_active == s)
       s->rpos = s->rbuf;
   }
 }
@@ -1850,8 +1865,8 @@ sk_read_ssh(sock *s)
 
  /* sk_read() and sk_write() are called from BFD's event loop */
 
-int
-sk_read(sock *s, int revents)
+static inline int
+sk_read_noflush(sock *s, int revents)
 {
   switch (s->type)
   {
@@ -1914,7 +1929,15 @@ sk_read(sock *s, int revents)
 }
 
 int
-sk_write(sock *s)
+sk_read(sock *s, int revents)
+{
+  int e = sk_read_noflush(s, revents);
+  tmp_flush();
+  return e;
+}
+
+static inline int
+sk_write_noflush(sock *s)
 {
   switch (s->type)
   {
@@ -1952,7 +1975,7 @@ sk_write(sock *s)
 #endif
 
   default:
-    if (s->ttx != s->tpos && sk_maybe_write(s) > 0)
+    if (sk_tx_pending(s) && sk_maybe_write(s) > 0)
     {
       if (s->tx_hook)
 	s->tx_hook(s);
@@ -1960,6 +1983,14 @@ sk_write(sock *s)
     }
     return 0;
   }
+}
+
+int
+sk_write(sock *s)
+{
+  int e = sk_write_noflush(s);
+  tmp_flush();
+  return e;
 }
 
 int sk_is_ipv4(sock *s)
@@ -1980,6 +2011,7 @@ sk_err(sock *s, int revents)
     }
 
   s->err_hook(s, se);
+  tmp_flush();
 }
 
 void
@@ -1989,11 +2021,11 @@ sk_dump_all(void)
   sock *s;
 
   debug("Open sockets:\n");
-  WALK_LIST(n, sock_list)
+  WALK_LIST(n, main_birdloop.sock_list)
   {
     s = SKIP_BACK(sock, n, n);
     debug("%p ", s);
-    sk_dump(&s->r);
+    sk_dump(&s->r, 3);
   }
   debug("\n");
 }
@@ -2016,34 +2048,21 @@ struct event_log_entry
 static struct event_log_entry event_log[EVENT_LOG_LENGTH];
 static struct event_log_entry *event_open;
 static int event_log_pos, event_log_num, watchdog_active;
-static btime last_time;
+static btime last_io_time;
 static btime loop_time;
 
 static void
 io_update_time(void)
 {
-  struct timespec ts;
-  int rv;
-
-  /*
-   * This is third time-tracking procedure (after update_times() above and
-   * times_update() in BFD), dedicated to internal event log and latency
-   * tracking. Hopefully, we consolidate these sometimes.
-   */
-
-  rv = clock_gettime(CLOCK_MONOTONIC, &ts);
-  if (rv < 0)
-    die("clock_gettime: %m");
-
-  last_time = ts.tv_sec S + ts.tv_nsec NS;
+  last_io_time = current_time();
 
   if (event_open)
   {
-    event_open->duration = last_time - event_open->timestamp;
+    event_open->duration = last_io_time - event_open->timestamp;
 
     if (event_open->duration > config->latency_limit)
-      log(L_WARN "Event 0x%p 0x%p took %d ms",
-	  event_open->hook, event_open->data, (int) (event_open->duration TO_MS));
+      log(L_WARN "Event 0x%p 0x%p took %u.%03u ms",
+	  event_open->hook, event_open->data, (uint) (event_open->duration TO_MS), (uint) (event_open->duration % 1000));
 
     event_open = NULL;
   }
@@ -2068,7 +2087,7 @@ io_log_event(void *hook, void *data)
 
   en->hook = hook;
   en->data = data;
-  en->timestamp = last_time;
+  en->timestamp = last_io_time;
   en->duration = 0;
 
   event_log_num++;
@@ -2096,16 +2115,18 @@ io_log_dump(void)
     struct event_log_entry *en = event_log + (event_log_pos + i) % EVENT_LOG_LENGTH;
     if (en->hook)
       log(L_DEBUG "  Event 0x%p 0x%p at %8d for %d ms", en->hook, en->data,
-	  (int) ((last_time - en->timestamp) TO_MS), (int) (en->duration TO_MS));
+	  (int) ((last_io_time - en->timestamp) TO_MS), (int) (en->duration TO_MS));
   }
 }
 
 void
 watchdog_sigalrm(int sig UNUSED)
 {
-  /* Update last_time and duration, but skip latency check */
+  /* Update last_io_time and duration, but skip latency check */
   config->latency_limit = 0xffffffff;
   io_update_time();
+
+  debug_safe("Watchdog timer timed out\n");
 
   /* We want core dump */
   abort();
@@ -2116,7 +2137,7 @@ watchdog_start1(void)
 {
   io_update_time();
 
-  loop_time = last_time;
+  loop_time = last_io_time;
 }
 
 static inline void
@@ -2124,7 +2145,7 @@ watchdog_start(void)
 {
   io_update_time();
 
-  loop_time = last_time;
+  loop_time = last_io_time;
   event_log_num = 0;
 
   if (config->watchdog_timeout)
@@ -2145,10 +2166,10 @@ watchdog_stop(void)
     watchdog_active = 0;
   }
 
-  btime duration = last_time - loop_time;
+  btime duration = last_io_time - loop_time;
   if (duration > config->watchdog_warning)
-    log(L_WARN "I/O loop cycle took %d ms for %d events",
-	(int) (duration TO_MS), event_log_num);
+    log(L_WARN "I/O loop cycle took %u.%03u ms for %d events",
+	(uint) (duration TO_MS), (uint) (duration % 1000), event_log_num);
 }
 
 
@@ -2159,8 +2180,10 @@ watchdog_stop(void)
 void
 io_init(void)
 {
-  init_list(&sock_list);
-  init_list(&global_event_list);
+  init_list(&main_birdloop.sock_list);
+  ev_init_list(&global_event_list, &main_birdloop, "Global event list");
+  ev_init_list(&global_work_list, &main_birdloop, "Global work list");
+  ev_init_list(&main_birdloop.event_list, &main_birdloop, "Global fast event list");
   krt_io_init();
   // XXX init_times();
   // XXX update_times();
@@ -2172,64 +2195,44 @@ io_init(void)
 
 static int short_loops = 0;
 #define SHORT_LOOP_MAX 10
+#define WORK_EVENTS_MAX 10
+
+sock *stored_sock;
 
 void
 io_loop(void)
 {
   int poll_tout, timeout;
-  int nfds, events, pout;
+  int events, pout;
   timer *t;
-  sock *s;
-  node *n;
-  int fdmax = 256;
-  struct pollfd *pfd = xmalloc(fdmax * sizeof(struct pollfd));
+  struct pfd pfd;
+  BUFFER_INIT(pfd.pfd, &root_pool, 16);
+  BUFFER_INIT(pfd.loop, &root_pool, 16);
 
   watchdog_start1();
   for(;;)
     {
-      times_update(&main_timeloop);
+      times_update();
       events = ev_run_list(&global_event_list);
-      timers_fire(&main_timeloop);
+      events = ev_run_list_limited(&global_work_list, WORK_EVENTS_MAX) || events;
+      events = ev_run_list(&main_birdloop.event_list) || events;
+      timers_fire(&main_birdloop.time, 1);
       io_close_event();
 
       // FIXME
       poll_tout = (events ? 0 : 3000); /* Time in milliseconds */
-      if (t = timers_first(&main_timeloop))
+      if (t = timers_first(&main_birdloop.time))
       {
-	times_update(&main_timeloop);
+	times_update();
 	timeout = (tm_remains(t) TO_MS) + 1;
 	poll_tout = MIN(poll_tout, timeout);
       }
 
-      nfds = 0;
-      WALK_LIST(n, sock_list)
-	{
-	  pfd[nfds] = (struct pollfd) { .fd = -1 }; /* everything other set to 0 by this */
-	  s = SKIP_BACK(sock, n, n);
-	  if (s->rx_hook)
-	    {
-	      pfd[nfds].fd = s->fd;
-	      pfd[nfds].events |= POLLIN;
-	    }
-	  if (s->tx_hook && s->ttx != s->tpos)
-	    {
-	      pfd[nfds].fd = s->fd;
-	      pfd[nfds].events |= POLLOUT;
-	    }
-	  if (pfd[nfds].fd != -1)
-	    {
-	      s->index = nfds;
-	      nfds++;
-	    }
-	  else
-	    s->index = -1;
+      BUFFER_FLUSH(pfd.pfd);
+      BUFFER_FLUSH(pfd.loop);
 
-	  if (nfds >= fdmax)
-	    {
-	      fdmax *= 2;
-	      pfd = xrealloc(pfd, fdmax * sizeof(struct pollfd));
-	    }
-	}
+      pipe_pollin(&main_birdloop.thread->wakeup, &pfd);
+      sockets_prepare(&main_birdloop, &pfd);
 
       /*
        * Yes, this is racy. But even if the signal comes before this test
@@ -2260,61 +2263,69 @@ io_loop(void)
 
       /* And finally enter poll() to find active sockets */
       watchdog_stop();
-      pout = poll(pfd, nfds, poll_tout);
+      birdloop_leave(&main_birdloop);
+      pout = poll(pfd.pfd.data, pfd.pfd.used, poll_tout);
+      birdloop_enter(&main_birdloop);
       watchdog_start();
 
       if (pout < 0)
 	{
 	  if (errno == EINTR || errno == EAGAIN)
 	    continue;
-	  die("poll: %m");
+	  bug("poll: %m");
 	}
       if (pout)
 	{
-	  times_update(&main_timeloop);
+	  if (pfd.pfd.data[0].revents & POLLIN)
+	  {
+	    /* IO loop reload requested */
+	    pipe_drain(&main_birdloop.thread->wakeup);
+	    atomic_fetch_and_explicit(&main_birdloop.thread_transition, ~LTT_PING, memory_order_acq_rel);
+	    continue;
+	  }
+
+	  times_update();
 
 	  /* guaranteed to be non-empty */
-	  current_sock = SKIP_BACK(sock, n, HEAD(sock_list));
+	  main_birdloop.sock_active = SKIP_BACK(sock, n, HEAD(main_birdloop.sock_list));
 
-	  while (current_sock)
+	  while (main_birdloop.sock_active)
+	  {
+	    sock *s = main_birdloop.sock_active;
+	    if (s->index != -1)
 	    {
-	      sock *s = current_sock;
-	      if (s->index == -1)
-		{
-		  current_sock = sk_next(s);
-		  goto next;
-		}
-
 	      int e;
 	      int steps;
 
 	      steps = MAX_STEPS;
-	      if (s->fast_rx && (pfd[s->index].revents & POLLIN) && s->rx_hook)
+	      if (s->fast_rx && (pfd.pfd.data[s->index].revents & POLLIN) && s->rx_hook)
 		do
 		  {
 		    steps--;
 		    io_log_event(s->rx_hook, s->data);
-		    e = sk_read(s, pfd[s->index].revents);
-		    if (s != current_sock)
-		      goto next;
+		    e = sk_read(s, pfd.pfd.data[s->index].revents);
 		  }
-		while (e && s->rx_hook && steps);
+		while (e && (main_birdloop.sock_active == s) && s->rx_hook && steps);
+
+	      if (s != main_birdloop.sock_active)
+		continue;
 
 	      steps = MAX_STEPS;
-	      if (pfd[s->index].revents & POLLOUT)
+	      if (pfd.pfd.data[s->index].revents & POLLOUT)
 		do
 		  {
 		    steps--;
 		    io_log_event(s->tx_hook, s->data);
 		    e = sk_write(s);
-		    if (s != current_sock)
-		      goto next;
 		  }
-		while (e && steps);
+		while (e && (main_birdloop.sock_active == s) && steps);
 
-	      current_sock = sk_next(s);
-	    next: ;
+	      if (s != main_birdloop.sock_active)
+		continue;
 	    }
+
+	    main_birdloop.sock_active = sk_next(s);
+	  }
 
 	  short_loops++;
 	  if (events && (short_loops < SHORT_LOOP_MAX))
@@ -2322,41 +2333,38 @@ io_loop(void)
 	  short_loops = 0;
 
 	  int count = 0;
-	  current_sock = stored_sock;
-	  if (current_sock == NULL)
-	    current_sock = SKIP_BACK(sock, n, HEAD(sock_list));
+	  main_birdloop.sock_active = stored_sock;
+	  if (main_birdloop.sock_active == NULL)
+	    main_birdloop.sock_active = SKIP_BACK(sock, n, HEAD(main_birdloop.sock_list));
 
-	  while (current_sock && count < MAX_RX_STEPS)
+	  while (main_birdloop.sock_active && count < MAX_RX_STEPS)
 	    {
-	      sock *s = current_sock;
+	      sock *s = main_birdloop.sock_active;
 	      if (s->index == -1)
-		{
-		  current_sock = sk_next(s);
-		  goto next2;
-		}
+		goto next2;
 
-	      if (!s->fast_rx && (pfd[s->index].revents & POLLIN) && s->rx_hook)
+	      if (!s->fast_rx && (pfd.pfd.data[s->index].revents & POLLIN) && s->rx_hook)
 		{
 		  count++;
 		  io_log_event(s->rx_hook, s->data);
-		  sk_read(s, pfd[s->index].revents);
-		  if (s != current_sock)
-		    goto next2;
+		  sk_read(s, pfd.pfd.data[s->index].revents);
+		  if (s != main_birdloop.sock_active)
+		    continue;
 		}
 
-	      if (pfd[s->index].revents & (POLLHUP | POLLERR))
+	      if (pfd.pfd.data[s->index].revents & (POLLHUP | POLLERR))
 		{
-		  sk_err(s, pfd[s->index].revents);
-		  if (s != current_sock)
-		    goto next2;
+		  sk_err(s, pfd.pfd.data[s->index].revents);
+		  if (s != main_birdloop.sock_active)
+		    continue;
 		}
 
-	      current_sock = sk_next(s);
 	    next2: ;
+	      main_birdloop.sock_active = sk_next(s);
 	    }
 
 
-	  stored_sock = current_sock;
+	  stored_sock = main_birdloop.sock_active;
 	}
     }
 }

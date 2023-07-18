@@ -20,6 +20,7 @@
 #include <pwd.h>
 #include <grp.h>
 #include <sys/stat.h>
+#include <sys/utsname.h>
 #include <libgen.h>
 
 #include "nest/bird.h"
@@ -27,9 +28,10 @@
 #include "lib/resource.h"
 #include "lib/socket.h"
 #include "lib/event.h"
+#include "lib/locking.h"
 #include "lib/timer.h"
 #include "lib/string.h"
-#include "nest/route.h"
+#include "nest/rt.h"
 #include "nest/protocol.h"
 #include "nest/iface.h"
 #include "nest/cli.h"
@@ -50,12 +52,12 @@ async_dump(void)
 {
   debug("INTERNAL STATE DUMP\n\n");
 
-  rdump(&root_pool);
+  rdump(&root_pool, 0);
   sk_dump_all();
   // XXXX tm_dump_all();
   if_dump_all();
   neigh_dump_all();
-  rta_dump_all();
+  ea_dump_all();
   rt_dump_all();
   protos_dump_all();
 
@@ -89,6 +91,21 @@ drop_gid(gid_t gid)
 }
 
 /*
+ *	Hostname
+ */
+
+char *
+get_hostname(linpool *lp)
+{
+  struct utsname uts = {};
+
+  if (uname(&uts) < 0)
+      return NULL;
+
+  return lp_strdup(lp, uts.nodename);
+}
+
+/*
  *	Reading the Configuration
  */
 
@@ -100,7 +117,7 @@ add_num_const(char *name, int val, const char *file, const uint line)
   struct f_val *v = cfg_alloc(sizeof(struct f_val));
   *v = (struct f_val) { .type = T_INT, .val.i = val };
   struct symbol *sym = cf_get_symbol(name);
-  if (sym->class && (sym->scope == conf_this_scope))
+  if (sym->class && cf_symbol_is_local(sym))
     cf_error("Error reading value for %s from %s:%d: already defined", name, file, line);
 
   cf_define_symbol(sym, SYM_CONSTANT | T_INT, val, v);
@@ -109,11 +126,11 @@ add_num_const(char *name, int val, const char *file, const uint line)
 /* the code of read_iproute_table() is based on
    rtnl_tab_initialize() from iproute2 package */
 static void
-read_iproute_table(char *file, char *prefix, int max)
+read_iproute_table(char *file, char *prefix, uint max)
 {
   char buf[512], namebuf[512];
   char *name;
-  int val;
+  uint val;
   FILE *fp;
 
   strcpy(namebuf, prefix);
@@ -135,11 +152,11 @@ read_iproute_table(char *file, char *prefix, int max)
 
     if (sscanf(p, "0x%x %s\n", &val, name) != 2 &&
 	sscanf(p, "0x%x %s #", &val, name) != 2 &&
-	sscanf(p, "%d %s\n", &val, name) != 2 &&
-	sscanf(p, "%d %s #", &val, name) != 2)
+	sscanf(p, "%u %s\n", &val, name) != 2 &&
+	sscanf(p, "%u %s #", &val, name) != 2)
       continue;
 
-    if (val < 0 || val > max)
+    if (val > max)
       continue;
 
     for(p = name; *p; p++)
@@ -175,17 +192,19 @@ sysdep_preconfig(struct config *c)
   c->watchdog_warning = UNIX_DEFAULT_WATCHDOG_WARNING;
 
 #ifdef PATH_IPROUTE_DIR
-  read_iproute_table(PATH_IPROUTE_DIR "/rt_protos", "ipp_", 256);
-  read_iproute_table(PATH_IPROUTE_DIR "/rt_realms", "ipr_", 256);
-  read_iproute_table(PATH_IPROUTE_DIR "/rt_scopes", "ips_", 256);
-  read_iproute_table(PATH_IPROUTE_DIR "/rt_tables", "ipt_", 256);
+  read_iproute_table(PATH_IPROUTE_DIR "/rt_protos", "ipp_", 255);
+  read_iproute_table(PATH_IPROUTE_DIR "/rt_realms", "ipr_", 0xffffffff);
+  read_iproute_table(PATH_IPROUTE_DIR "/rt_scopes", "ips_", 255);
+  read_iproute_table(PATH_IPROUTE_DIR "/rt_tables", "ipt_", 0xffffffff);
 #endif
 }
 
 int
-sysdep_commit(struct config *new, struct config *old UNUSED)
+sysdep_commit(struct config *new, struct config *old)
 {
   log_switch(0, &new->logfiles, new->syslog_name);
+  bird_thread_commit(new, old);
+
   return 0;
 }
 
@@ -226,6 +245,8 @@ async_config(void)
 {
   struct config *conf;
 
+  config_free_old();
+
   log(L_INFO "Reconfiguration requested by SIGHUP");
   if (!unix_read_config(&conf, config_name))
     {
@@ -264,6 +285,9 @@ cmd_read_config(const char *name)
 void
 cmd_check_config(const char *name)
 {
+  if (cli_access_restricted())
+    return;
+
   struct config *conf = cmd_read_config(name);
   if (!conf)
     return;
@@ -307,6 +331,8 @@ cmd_reconfig(const char *name, int type, uint timeout)
 {
   if (cli_access_restricted())
     return;
+
+  config_free_old();
 
   struct config *conf = cmd_read_config(name);
   if (!conf)
@@ -378,7 +404,8 @@ static char *path_control_socket = PATH_CONTROL_SOCKET;
 static void
 cli_write(cli *c)
 {
-  sock *s = c->priv;
+  sock *s = c->sock;
+  ASSERT_DIE(c->sock);
 
   while (c->tx_pos)
     {
@@ -402,7 +429,9 @@ cli_write(cli *c)
 void
 cli_write_trigger(cli *c)
 {
-  sock *s = c->priv;
+  sock *s = c->sock;
+  if (!s)
+    return;
 
   if (s->tbuf == NULL)
     cli_write(c);
@@ -417,8 +446,9 @@ cli_tx(sock *s)
 int
 cli_get_command(cli *c)
 {
-  sock *s = c->priv;
-  byte *t = c->rx_aux ? : s->rbuf;
+  sock *s = c->sock;
+  ASSERT_DIE(c->sock);
+  byte *t = s->rbuf;
   byte *tend = s->rpos;
   byte *d = c->rx_pos;
   byte *dend = c->rx_buf + CLI_RX_BUF_SIZE - 2;
@@ -429,16 +459,22 @@ cli_get_command(cli *c)
 	t++;
       else if (*t == '\n')
 	{
-	  t++;
-	  c->rx_pos = c->rx_buf;
-	  c->rx_aux = t;
 	  *d = 0;
+	  t++;
+
+	  /* Move remaining data and reset pointers */
+	  uint rest = (t < tend) ? (tend - t) : 0;
+	  memmove(s->rbuf, t, rest);
+	  s->rpos = s->rbuf + rest;
+	  c->rx_pos = c->rx_buf;
+
 	  return (d < dend) ? 1 : -1;
 	}
       else if (d < dend)
 	*d++ = *t++;
     }
-  c->rx_aux = s->rpos = s->rbuf;
+
+  s->rpos = s->rbuf;
   c->rx_pos = d;
   return 0;
 }
@@ -460,7 +496,16 @@ cli_err(sock *s, int err)
       else
 	log(L_INFO "CLI connection closed");
     }
+
   cli_free(s->data);
+}
+
+static void
+cli_connect_err(sock *s UNUSED, int err)
+{
+  ASSERT_DIE(err);
+  if (config->cli_debug)
+    log(L_INFO "Failed to accept CLI connection: %s", strerror(err));
 }
 
 static int
@@ -477,7 +522,6 @@ cli_connect(sock *s, uint size UNUSED)
   s->pool = c->pool;		/* We need to have all the socket buffers allocated in the cli pool */
   s->fast_rx = 1;
   c->rx_pos = c->rx_buf;
-  c->rx_aux = NULL;
   rmove(s, c->pool);
   return 1;
 }
@@ -491,13 +535,14 @@ cli_init_unix(uid_t use_uid, gid_t use_gid)
   s = cli_sk = sk_new(cli_pool);
   s->type = SK_UNIX_PASSIVE;
   s->rx_hook = cli_connect;
+  s->err_hook = cli_connect_err;
   s->rbsize = 1024;
   s->fast_rx = 1;
 
   /* Return value intentionally ignored */
   unlink(path_control_socket);
 
-  if (sk_open_unix(s, path_control_socket) < 0)
+  if (sk_open_unix(s, &main_birdloop, path_control_socket) < 0)
     die("Cannot create control socket %s: %m", path_control_socket);
 
   if (use_uid || use_gid)
@@ -848,15 +893,18 @@ main(int argc, char **argv)
     dmalloc_debug(0x2f03d00);
 #endif
 
+  times_update();
   parse_args(argc, argv);
   log_switch(1, NULL, NULL);
 
-  net_init(); //Check des trucs sur la taille
-  resource_init(); //Ressource pool
-  timer_init(); //timer
-  olock_init(); //Lock
-  io_init(); 
+  the_bird_lock();
+
+  random_init();
+  resource_init();
+  birdloop_init();
+  olock_init();
   rt_init();
+  io_init();
   if_init();
 //  roa_init();
   config_init();
@@ -880,13 +928,13 @@ main(int argc, char **argv)
     open_pid_file();
 
   protos_build();
-  proto_build(&proto_unix_kernel);
-  proto_build(&proto_unix_iface);
 
   struct config *conf = read_config();
 
   if (parse_and_exit)
     exit(0);
+
+  flush_local_pages();
 
   if (!run_in_foreground)
     {
@@ -902,6 +950,7 @@ main(int argc, char **argv)
       dup2(0, 1);
       dup2(0, 2);
     }
+
 
   main_thread_init();
 
