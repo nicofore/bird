@@ -4484,29 +4484,7 @@ rt_feed_by_fib(void *data)
 	//RT_LOCKED(RT_PUB(SKIP_BACK(struct rtable_private, exporter, c->table)), tab)
 	//{
 
-		//FIB_ITERATE_START(&tab->fib, fit, net, n)
-
-		do                                                 
-  { 
-    struct fib * f_ = (&tab->fib);                                                 
-    
-    struct fib_node *fn_ = fit_get(f_, fit);   
-    uint count_ = (f_)->hash_size;                  
-    uint hpos_ = (fit)->hash;                         
-    net *n;                                         
-    for (;;)                                         
-    {                                                
-      if (!fn_)                                      
-      {                                              
-        
-        if (++hpos_ >= count_)                       
-          break;
-		pthread_mutex_unlock(f_->fib_locks[hpos_-1]);                                     
-        pthread_mutex_lock(f_->fib_locks[hpos_]);  
-        fn_ = (f_)->hash_table[hpos_];              
-        continue;                                    
-      }                                              
-      n = fib_node_to_user(f_, fn_);
+		FIB_ITERATE_START(&tab->fib, fit, net, n)
 		{
 			if ((c->h.req->addr_mode == TE_ADDR_NONE) || net_in_netX(n->n.addr, c->h.req->addr))
 			{
