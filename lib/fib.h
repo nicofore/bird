@@ -96,17 +96,18 @@ void fit_copy(struct fib *f, struct fib_iterator *dst, struct fib_iterator *src)
   do                                                 \
   { \
   struct fib * f_ = (f); \
+  pthread_mutex_lock((f)->fib_locks[0]); \
   int size = (f)->hash_size; \
-  for (int i = 0; i < size; i++) pthread_mutex_lock((f)->fib_locks[i]); \
-  if (size!= (f)->hash_size) for (int i = size; i < (f)->hash_size; i++) pthread_mutex_lock((f)->fib_locks[i]); \
     struct fib_node *fn_, **ff_ = (f_)->hash_table; \
     uint count_ = (f_)->hash_size;                  \
     type *z;                                         \
-    while (count_--)                                 \
-      for (fn_ = *ff_++; z = fib_node_to_user(f_, fn_); fn_ = fn_->next);
+    while (count_--){                                 \
+      for (fn_ = *ff_++; z = fib_node_to_user(f_, fn_); fn_ = fn_->next)
 
 #define FIB_WALK_END \
-  for (int i = 0; i < size; i++) pthread_mutex_unlock(f_->fib_locks[i]); \
+  if (count_) pthread_mutex_lock(f_->fib_locks[size-count_]); \
+  pthread_mutex_unlock(f_->fib_locks[size-count_-1]);\
+  }                  \
   }                  \
   while (0);
 
@@ -124,10 +125,10 @@ void fit_copy(struct fib *f, struct fib_iterator *dst, struct fib_iterator *src)
     {                                                \
       if (!fn_)                                      \
       {                                              \
-        if (hpos_ != ~0-1) pthread_mutex_unlock(f_->fib_locks[hpos_]);\
+        if (hpos_+1< count_) pthread_mutex_lock(f_->fib_locks[hpos_+1]);\
         if (++hpos_ >= count_)                       \
           break;                                     \
-        pthread_mutex_lock(f_->fib_locks[hpos_]);  \
+        pthread_mutex_unlock(f_->fib_locks[hpos_-1]);  \
         fn_ = (f_)->hash_table[hpos_];              \
         continue;                                    \
       }                                              \
@@ -136,6 +137,7 @@ void fit_copy(struct fib *f, struct fib_iterator *dst, struct fib_iterator *src)
 #define FIB_ITERATE_END \
   fn_ = fn_->next;      \
   }                     \
+  if (hpos_ != ~0) pthread_mutex_unlock(f_->fib_locks[hpos_-1]); \
   }                     \
   while (0);
 
