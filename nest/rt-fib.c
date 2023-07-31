@@ -60,6 +60,8 @@
 
 #include <stdlib.h>
 #include <stdio.h>
+#include <pthread.h>
+#include <unistd.h>
 
 /*
  * The FIB rehash values are maintaining FIB count betwee
@@ -116,6 +118,67 @@
 
 #define MAX_THREADS 32
 
+static void removeALink(atomic_uintptr_t *ptr)
+{
+	if (atomic_load(ptr) == 0)
+		return;
+	struct fib_node *node = (struct fib_node *)atomic_load(ptr);
+	atomic_fetch_sub(&(node->sentinel), 2);
+}
+static char getNumberOfLink(atomic_uintptr_t *ptr)
+{
+	struct fib_node *node = (struct fib_node *)atomic_load(ptr);
+	return (char)(atomic_load(&(node->sentinel)) >> 1);
+}
+
+
+
+
+void fib__free(struct fib *f)
+{
+	// Liberating all route in the hash table
+	atomic_uintptr_t curr;
+	atomic_uintptr_t succ;
+
+	atomic_uintptr_t *curr_ptr = &curr;
+	atomic_uintptr_t *succ_ptr = &succ;
+
+	atomic_store(curr_ptr, atomic_load(&(f->hash_table[0])));
+	while (atomic_load(curr_ptr) != 0)
+	{
+		atomic_store(succ_ptr, getNextAddress(curr_ptr));
+		if (getSentinel(curr_ptr))
+		{
+			free((void *)atomic_load(curr_ptr));
+		}
+		else
+		{
+			free(fib_node_to_user(f, (struct fib_node *)atomic_load(curr_ptr)));
+		}
+		atomic_store(curr_ptr, atomic_load(succ_ptr));
+	}
+
+	//Liberating handovers
+	struct node_memory *currHandover = f->handovers;
+
+	while (currHandover != NULL)
+	{
+		struct node_memory *next = currHandover->next;
+		free(currHandover);
+		currHandover = next;
+	}
+
+	// Free the hash table
+	free(atomic_load(&(f->hash_table)));
+
+	free(f->reserved_row);
+
+	free(f);
+}
+
+
+
+
 static inline u32 fib_hash(struct fib *f, const net_addr *a);
 
 int getParent(u32 bucket, u32 bucketSize)
@@ -161,17 +224,39 @@ int getFlag(atomic_uintptr_t *ptr)
 	return (int)(atomic_load(&(node->next)) & 1);
 }
 
-u32 reverseBits(u32 num)
+
+//Comes from https://stackoverflow.com/questions/746171/efficient-algorithm-for-bit-reversal-from-msb-lsb-to-lsb-msb-in-c
+static const unsigned char BitReverseTable256[] = 
 {
-	u32 NO_OF_BITS = sizeof(num) * 8;
-	u32 reverse_num = 0;
-	u32 i;
-	for (i = 0; i < NO_OF_BITS; i++)
-	{
-		if ((num & (1 << i)))
-			reverse_num |= 1 << ((NO_OF_BITS - 1) - i);
-	}
-	return reverse_num;
+  0x00, 0x80, 0x40, 0xC0, 0x20, 0xA0, 0x60, 0xE0, 0x10, 0x90, 0x50, 0xD0, 0x30, 0xB0, 0x70, 0xF0, 
+  0x08, 0x88, 0x48, 0xC8, 0x28, 0xA8, 0x68, 0xE8, 0x18, 0x98, 0x58, 0xD8, 0x38, 0xB8, 0x78, 0xF8, 
+  0x04, 0x84, 0x44, 0xC4, 0x24, 0xA4, 0x64, 0xE4, 0x14, 0x94, 0x54, 0xD4, 0x34, 0xB4, 0x74, 0xF4, 
+  0x0C, 0x8C, 0x4C, 0xCC, 0x2C, 0xAC, 0x6C, 0xEC, 0x1C, 0x9C, 0x5C, 0xDC, 0x3C, 0xBC, 0x7C, 0xFC, 
+  0x02, 0x82, 0x42, 0xC2, 0x22, 0xA2, 0x62, 0xE2, 0x12, 0x92, 0x52, 0xD2, 0x32, 0xB2, 0x72, 0xF2, 
+  0x0A, 0x8A, 0x4A, 0xCA, 0x2A, 0xAA, 0x6A, 0xEA, 0x1A, 0x9A, 0x5A, 0xDA, 0x3A, 0xBA, 0x7A, 0xFA,
+  0x06, 0x86, 0x46, 0xC6, 0x26, 0xA6, 0x66, 0xE6, 0x16, 0x96, 0x56, 0xD6, 0x36, 0xB6, 0x76, 0xF6, 
+  0x0E, 0x8E, 0x4E, 0xCE, 0x2E, 0xAE, 0x6E, 0xEE, 0x1E, 0x9E, 0x5E, 0xDE, 0x3E, 0xBE, 0x7E, 0xFE,
+  0x01, 0x81, 0x41, 0xC1, 0x21, 0xA1, 0x61, 0xE1, 0x11, 0x91, 0x51, 0xD1, 0x31, 0xB1, 0x71, 0xF1,
+  0x09, 0x89, 0x49, 0xC9, 0x29, 0xA9, 0x69, 0xE9, 0x19, 0x99, 0x59, 0xD9, 0x39, 0xB9, 0x79, 0xF9, 
+  0x05, 0x85, 0x45, 0xC5, 0x25, 0xA5, 0x65, 0xE5, 0x15, 0x95, 0x55, 0xD5, 0x35, 0xB5, 0x75, 0xF5,
+  0x0D, 0x8D, 0x4D, 0xCD, 0x2D, 0xAD, 0x6D, 0xED, 0x1D, 0x9D, 0x5D, 0xDD, 0x3D, 0xBD, 0x7D, 0xFD,
+  0x03, 0x83, 0x43, 0xC3, 0x23, 0xA3, 0x63, 0xE3, 0x13, 0x93, 0x53, 0xD3, 0x33, 0xB3, 0x73, 0xF3, 
+  0x0B, 0x8B, 0x4B, 0xCB, 0x2B, 0xAB, 0x6B, 0xEB, 0x1B, 0x9B, 0x5B, 0xDB, 0x3B, 0xBB, 0x7B, 0xFB,
+  0x07, 0x87, 0x47, 0xC7, 0x27, 0xA7, 0x67, 0xE7, 0x17, 0x97, 0x57, 0xD7, 0x37, 0xB7, 0x77, 0xF7, 
+  0x0F, 0x8F, 0x4F, 0xCF, 0x2F, 0xAF, 0x6F, 0xEF, 0x1F, 0x9F, 0x5F, 0xDF, 0x3F, 0xBF, 0x7F, 0xFF
+};
+
+
+u32 reverseBits(u32 x)
+{
+	u32 reverseValue;
+	unsigned char *c = (char *) &reverseValue;
+	unsigned char *p = (char *) &x;
+	c[0] = BitReverseTable256[p[3]];
+	c[1] = BitReverseTable256[p[2]];
+	c[2] = BitReverseTable256[p[1]];
+	c[3] = BitReverseTable256[p[0]];
+    return reverseValue;
 }
 
 u32 getHashFromSentinel(struct fib *f, atomic_uintptr_t *ptr)
@@ -212,11 +297,7 @@ char getSentinel(atomic_uintptr_t *ptr)
 	return (char)(atomic_load(&(node->sentinel)) & 1);
 }
 
-static char getNumberOfLink(atomic_uintptr_t *ptr)
-{
-	struct fib_node *node = (struct fib_node *)atomic_load(ptr);
-	return (char)(atomic_load(&(node->sentinel)) >> 1);
-}
+
 
 // Store in sentinel, lowest bit is flag, rest is number of links
 
@@ -228,13 +309,7 @@ static void addALink(atomic_uintptr_t *ptr)
 	atomic_fetch_add(&(node->sentinel), 2);
 }
 
-static void removeALink(atomic_uintptr_t *ptr)
-{
-	if (atomic_load(ptr) == 0)
-		return;
-	struct fib_node *node = (struct fib_node *)atomic_load(ptr);
-	atomic_fetch_sub(&(node->sentinel), 2);
-}
+
 
 void printfib(struct fib *f)
 {
@@ -253,48 +328,84 @@ void printfib(struct fib *f)
 
 static void freeNode(struct fib *f, atomic_uintptr_t *ptr, int row)
 {
-	for (int i = 0; i < MAX_THREADS; i++)
-	{
-		for (int j = 0; j < 2; j++)
-		{
-			if (atomic_load(&(f->soft_links[i][j])) == atomic_load(ptr))
-			{
-				// Exchange with hand hovers
-				atomic_store(ptr, atomic_exchange(&(f->hand_overs[i][j]), atomic_load(ptr)));
-				// If pointer we have is NULL, return
-				if (atomic_load(ptr) == 0)
-				{
-					return;
-				}
-			}
-		}
+	//Add node to handovers
+	u8 succ = 0;
+	struct node_memory *new_node = malloc(sizeof(struct node_memory));
+	struct node_memory *expected;
+	new_node->prev = NULL;
+	new_node->node = (struct fib_node *)atomic_load(ptr);
+	while (!succ){
+		new_node->next = f->handovers;
+		expected = new_node->next;
+		succ = atomic_compare_exchange_strong(&(f->handovers), &(expected), new_node);
 	}
-	
-	// Check if pointer to node, if there are, check for other possible pointers
-	if (getNumberOfLink(ptr) != 0)
-	{
-		// Some other node in hand_overs has 0 pointer to it and can be freed
-		for (int i = 0; i < MAX_THREADS; i++)
-		{
-			for (int j = 0; j < 2; j++)
-			{
-				if (atomic_load(&(f->hand_overs[i][j])) && getNumberOfLink(&(f->hand_overs[i][j])) == 0)
-				{
-					atomic_store(ptr, atomic_exchange(&(f->hand_overs[i][j]), atomic_load(ptr)));
-					freeNode(f, ptr, row);
-					return;
-				}
-			}
-		}
-	}
-	
+	expected->prev = new_node;
 
-	atomic_uintptr_t nextNode;
-	atomic_store(&nextNode, getNextAddress(ptr));
-	removeALink(&nextNode);
-	ASSERT(getNumberOfLink(ptr) == 0);
-	free(fib_node_to_user(f, (struct fib_node *)atomic_load(ptr)));
 }
+
+
+void * freeHandovers(void* f)
+{
+	struct fib *fib = (struct fib *)f;
+	while (!fib->stopThread){
+		struct node_memory *node = fib->handovers_end->prev;
+		while (node != NULL){
+			struct fib_node* fnode = node->node;
+			//Check if can be freed
+			if (getNumberOfLink((atomic_uintptr_t*) fnode) == 0){
+				//Check in soft_links if can be free
+
+				for (int i = 0; i < MAX_THREADS; i++)
+				{
+					for (int j = 0; j < 2; j++){
+						atomic_uintptr_t ptr = fib->soft_links[i][j];
+						if (ptr == (atomic_uintptr_t)fnode){
+							//Node still used
+							goto next;
+						}
+						while (getFlag(&ptr)){
+							ptr = getNextAddress(&ptr);
+							if (ptr == (atomic_uintptr_t)fnode){
+								//Node still used
+								goto next;
+							}
+						}
+					}
+				}
+				//Can be freed
+				//First node of handovers
+				u8 success = 0;
+				while (node->prev == NULL){
+					struct memory_node *expected = node;
+					success = atomic_compare_exchange_strong(&(fib->handovers), &expected, node->next);
+					if (success)
+						break;
+				}
+				if (!success && node->prev != NULL){
+					//Not first node
+					node->prev->next = node->next;
+				}
+				node->next->prev = node->prev;
+
+				//Can free node
+				removeALink(getNextAddress(fnode));
+				free(fib_node_to_user(fib, fnode));
+				struct node_memory *temp = node;
+				node = node->prev;
+				free(temp);
+				continue;
+			}
+			next:
+			node = node->prev;
+		}
+
+		sleep(30);
+	}
+
+	fib__free(fib);
+	return NULL;
+}
+
 
 /**
  * fib_init - initialize a new FIB
@@ -348,22 +459,14 @@ void fib_init(struct fib *f, pool *p, uint addr_type, uint node_size, uint node_
 	for (uint i = 0; i < MAX_THREADS; i++)
 		atomic_store(&(f->reserved_row[i]), 0);
 
-	// Allocate the softlinks and handovers
-	// atomic_store(&(f->soft_links), mb_alloc(f->fib_pool, sizeof(atomic_uintptr_t *) * MAX_THREADS));
-	// atomic_store(&(f->hand_overs), mb_alloc(f->fib_pool, sizeof(atomic_uintptr_t *) * MAX_THREADS));
+	// Allocate the softlinks
 	atomic_store(&(f->soft_links), malloc(sizeof(atomic_uintptr_t *) * MAX_THREADS));
-	atomic_store(&(f->hand_overs), malloc(sizeof(atomic_uintptr_t *) * MAX_THREADS));
 	for (uint i = 0; i < MAX_THREADS; i++)
 	{
-		// atomic_store(&(f->soft_links[i]), mb_alloc(f->fib_pool, 2 * sizeof(atomic_uintptr_t)));
-		// atomic_store(&(f->hand_overs[i]), mb_alloc(f->fib_pool, 2 * sizeof(atomic_uintptr_t)));
 		atomic_store(&(f->soft_links[i]), malloc(2 * sizeof(atomic_uintptr_t)));
-		atomic_store(&(f->hand_overs[i]), malloc(2 * sizeof(atomic_uintptr_t)));
 
 		atomic_store(&(f->soft_links[i][0]), 0);
 		atomic_store(&(f->soft_links[i][1]), 0);
-		atomic_store(&(f->hand_overs[i][0]), 0);
-		atomic_store(&(f->hand_overs[i][1]), 0);
 	}
 
 	atomic_store(&(f->entries), 0);
@@ -378,6 +481,18 @@ void fib_init(struct fib *f, pool *p, uint addr_type, uint node_size, uint node_
 	atomic_store(&(b->next), 0);
 	atomic_store(&(b->sentinel), 1);
 	atomic_store(&(f->hash_table[0]), (atomic_uintptr_t)b);
+
+	f->handovers_end = malloc(sizeof(struct node_memory));
+	f->handovers_end->next = NULL;
+	f->handovers_end->prev = NULL;
+	f->handovers_end->node = NULL;
+	f->handovers = f->handovers_end;
+	f->stopThread = 0;
+
+	pthread_create(&(f->t), NULL, freeHandovers, f);
+
+
+
 }
 
 // Resize
@@ -958,7 +1073,6 @@ int fib_delete(struct fib *f, void *E)
 			{
 				// Node was removed, return
 				// Go through softlinks and handovers
-				
 				removeALink(succ);
 				if (atomic_load(succ) != 0){
 					atomic_store(curr, getNextAddress(succ));
@@ -993,54 +1107,12 @@ int fib_delete(struct fib *f, void *E)
  * This function deletes a FIB -- it frees all memory associated
  * with it and all its entries.
  */
-void fib_free(struct fib *f)
-{
-	// Liberating all route in the hash table
-	atomic_uintptr_t curr;
-	atomic_uintptr_t succ;
-
-	atomic_uintptr_t *curr_ptr = &curr;
-	atomic_uintptr_t *succ_ptr = &succ;
-
-	atomic_store(curr_ptr, atomic_load(&(f->hash_table[0])));
-	while (atomic_load(curr_ptr) != 0)
-	{
-		atomic_store(succ_ptr, getNextAddress(curr_ptr));
-		if (getSentinel(curr_ptr))
-		{
-			free((void *)atomic_load(curr_ptr));
-		}
-		else
-		{
-			free(fib_node_to_user(f, (struct fib_node *)atomic_load(curr_ptr)));
-		}
-		atomic_store(curr_ptr, atomic_load(succ_ptr));
-	}
-
-	// Liberating all handovers
-
-	for (int i = 0; i < MAX_THREADS; i++)
-	{
-		for (int j = 0; j < 2; j++)
-		{
-			if (atomic_load(&(f->hand_overs[i][j])) != 0)
-			{
-				free(fib_node_to_user(f, (struct fib_node *)atomic_load(&(f->hand_overs[i][j]))));
-			}
-		}
-		free(f->hand_overs[i]);
-		free(f->soft_links[i]);
-	}
-	free(f->hand_overs);
-	free(f->soft_links);
-
-	// Free the hash table
-	free(atomic_load(&(f->hash_table)));
-
-	free(f->reserved_row);
-
-	free(f);
+void fib_free(struct fib *f){
+	f->stopThread = 1;
 }
+
+
+
 
 void fit_init(struct fib_iterator *i, struct fib *f)
 {

@@ -35,6 +35,15 @@ struct fib_iterator {			/* See lib/slists.h for an explanation */
   uint row;
 };
 
+struct node_memory
+{
+	struct fib_node *node;
+	struct node_memory *next;
+	struct node_memory *prev;
+};
+
+
+
 typedef void (*fib_init_fn)(void *);
 
 struct fib {
@@ -43,7 +52,8 @@ struct fib {
   atomic_uintptr_t* hash_table;		/* Node hash table */
   atomic_bool* reserved_row;    /* Row of reserved in the hazard pointer */
   atomic_uintptr_t** soft_links; /* Soft links used */
-  atomic_uintptr_t** hand_overs; /* Hand hovers of softlinks */
+  struct node_memory *handovers; /* Hand hovers of softlinks */
+  struct node_memory *handovers_end;
   atomic_uint hash_size;			/* Number of hash table entries (a power of two) */
   atomic_uint hash_order;			/* Binary logarithm of hash_size */
   atomic_uint hash_shift;			/* 32 - hash_order */
@@ -54,7 +64,9 @@ struct fib {
   atomic_uint entries;				/* Number of entries */
   atomic_uint entries_min, entries_max;	/* Entry count limits (else start rehashing) */
   fib_init_fn init;			/* Constructor */
+  pthread_t t;
   atomic_bool resizing;			/* resizing in progress */
+  char stopThread;
 };
 
 static inline void * fib_node_to_user(struct fib *f, struct fib_node *e)
