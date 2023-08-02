@@ -3398,9 +3398,9 @@ rt_export_cleanup(struct rtable_private *tab)
 		first = next;
 	}
 
-	pthread_mutex_unlock(recalculate);
+	//pthread_mutex_unlock(recalculate);
 	rt_check_cork_low(tab);
-	pthread_mutex_lock(recalculate);
+	//pthread_mutex_lock(recalculate);
 
 done:;
 	struct rt_import_hook *ih;
