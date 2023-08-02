@@ -168,6 +168,8 @@ void fib_init(struct fib *f, pool *p, uint addr_type, uint node_size, uint node_
   f->init = init;
 
   f->fib_locks = mb_alloc(f->fib_pool, f->hash_size * sizeof(pthread_mutex_t*));
+  for (int i = 0; i < f->hash_size; i++)
+    f->fib_locks[i] = mb_alloc(f->fib_pool, sizeof(pthread_mutex_t));
   pthread_mutex_init(&f->memory_lock, NULL);
   pthread_mutexattr_t Attr;
   pthread_mutexattr_init(&Attr);
