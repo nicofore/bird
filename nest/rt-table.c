@@ -2951,16 +2951,7 @@ void rt_exporter_init(struct rt_exporter *e)
 static struct idm rtable_idm;
 uint rtable_max_id = 0;
 
-static void
-net_init_entry(void *E)
-{
-  net* e = (net*) E;
 
-	pthread_mutexattr_t tempAttr;
-  pthread_mutexattr_init(&tempAttr);
-pthread_mutexattr_settype(&tempAttr, PTHREAD_MUTEX_RECURSIVE);
-  pthread_mutex_init(&(e->mutex), &tempAttr);
-}
 
 rtable *
 rt_setup(pool *pp, struct rtable_config *cf)
@@ -2994,7 +2985,7 @@ rt_setup(pool *pp, struct rtable_config *cf)
 	if (t->id >= rtable_max_id)
 		rtable_max_id = t->id + 1;
 
-	fib_init(&t->fib, p, t->addr_type, sizeof(net), OFFSETOF(net, n), 0, net_init_entry);
+	fib_init(&t->fib, p, t->addr_type, sizeof(net), OFFSETOF(net, n), 0, NULL);
 
 	if (cf->trie_used)
 	{
