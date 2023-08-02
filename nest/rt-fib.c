@@ -55,8 +55,13 @@
 #undef LOCAL_DEBUG
 
 #include "nest/bird.h"
-#include "nest/route.h"
+#include "lib/route.h"
+#include "lib/fib.h"
 #include "lib/string.h"
+
+#include <pthread.h>
+
+
 
 /*
  * The FIB rehash values are maintaining FIB count between N/5 and 2N. What
@@ -626,7 +631,7 @@ retry:
 
       pthread_mutex_lock(&f->memory_lock);
       if (f->fib_slab)
-        sl_free(f->fib_slab, E);
+        sl_free(E);
       else
         mb_free(E);
       pthread_mutex_unlock(&f->memory_lock);
@@ -670,6 +675,7 @@ void fit_init(struct fib_iterator *i, struct fib *f)
         i->next->prev = i;
       n->readers = i;
       i->node = n;
+	  i->hash = h;
       pthread_mutex_unlock(f->fib_locks[h]);
       return;
     }
@@ -678,6 +684,7 @@ void fit_init(struct fib_iterator *i, struct fib *f)
   /* The fib is empty, nothing to do */
   i->prev = i->next = NULL;
   i->node = NULL;
+  i->hash = 0;
 }
 
 struct fib_node *
@@ -705,6 +712,7 @@ fit_get(struct fib *f, struct fib_iterator *i)
     k->prev = j;
   j->next = k;
   i->hash = fib_hash(f, n->addr);
+  pthread_mutex_lock(f->fib_locks[i->hash]);
   return n;
 }
 

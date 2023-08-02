@@ -46,9 +46,7 @@ run_function(const void *arg)
   if (t->cmp)
     return t->result == f_same(t->fn, t->cmp);
 
-  linpool *tmp = lp_new_default(&root_pool);
-  enum filter_return fret = f_eval(t->fn, tmp, NULL);
-  rfree(tmp);
+  enum filter_return fret = f_eval(t->fn, NULL);
 
   return (fret < F_REJECT);
 }
@@ -72,6 +70,7 @@ int
 main(int argc, char *argv[])
 {
   bt_init(argc, argv);
+
   bt_bird_init();
 
   bt_assert_hook = bt_assert_filter;
@@ -80,12 +79,11 @@ main(int argc, char *argv[])
   if (!bt_config_file_parse(BT_CONFIG_FILE))
     abort();
 
-  bt_test_suite(t_reconfig, "Testing reconfiguration");
+  bt_test_suite_extra(t_reconfig, 0, BT_TIMEOUT, "Testing reconfiguration");
 
   struct f_bt_test_suite *t;
   WALK_LIST(t, config->tests)
-    bt_test_suite_base(run_function, t->fn_name, t, BT_FORKING, BT_TIMEOUT, "%s", t->dsc);
+    bt_test_suite_base(run_function, t->fn_name, t, 0, BT_TIMEOUT, "%s", t->dsc);
 
-  bt_bird_cleanup();
   return bt_exit_value();
 }

@@ -1,0 +1,10 @@
+{
+    "files.associations": {
+        "bgp.h": "c",
+        "data.h": "c",
+        "resource.h": "c",
+        "timer.h": "c",
+        "tlists.h": "c",
+        "rcu.h": "c"
+    }
+}

@@ -101,8 +101,11 @@
  * RFC 8203 - BGP Administrative Shutdown Communication
  * RFC 8212 - Default EBGP Route Propagation Behavior without Policies
  * RFC 8654 - Extended Message Support for BGP
- * draft-ietf-idr-ext-opt-param-07
+ * RFC 9072 - Extended Optional Parameters Length for BGP OPEN Message
+ * RFC 9117 - Revised Validation Procedure for BGP Flow Specifications
+ * RFC 9234 - Route Leak Prevention and Detection Using Roles
  * draft-uttaro-idr-bgp-persistence-04
+ * draft-walton-bgp-hostname-capability-02
  */
 
 #undef LOCAL_DEBUG
@@ -112,7 +115,7 @@
 #include "nest/bird.h"
 #include "nest/iface.h"
 #include "nest/protocol.h"
-#include "nest/route.h"
+#include "nest/rt.h"
 #include "nest/cli.h"
 #include "nest/locks.h"
 #include "conf/conf.h"
@@ -123,93 +126,64 @@
 
 #include "bgp.h"
 
+#include <pthread.h>
 
-struct linpool *bgp_linpool;		/* Global temporary pool */
-struct linpool *bgp_linpool2;		/* Global temporary pool for bgp_rt_notify() */
-static list bgp_sockets;		/* Global list of listening sockets */
 
+static void bgp_listen_create(void *);
+
+static list STATIC_LIST_INIT(bgp_sockets);		/* Global list of listening sockets */
+static list STATIC_LIST_INIT(bgp_listen_pending);	/* Global list of listening socket open requests */
+static event bgp_listen_event = { .hook = bgp_listen_create };
+
+static DOMAIN(rtable) bgp_listen_domain;
+static pool *bgp_listen_pool;
 
 static void bgp_connect(struct bgp_proto *p);
 static void bgp_active(struct bgp_proto *p);
 static void bgp_setup_conn(struct bgp_proto *p, struct bgp_conn *conn);
 static void bgp_setup_sk(struct bgp_conn *conn, sock *s);
 static void bgp_send_open(struct bgp_conn *conn);
-static void bgp_update_bfd(struct bgp_proto *p, int use_bfd);
+static void bgp_update_bfd(struct bgp_proto *p, const struct bfd_options *bfd);
 
 static int bgp_incoming_connection(sock *sk, uint dummy UNUSED);
 static void bgp_listen_sock_err(sock *sk UNUSED, int err);
+static void bgp_initiate_disable(struct bgp_proto *p, int err_val);
 
-/**
- * bgp_open - open a BGP instance
- * @p: BGP instance
- *
- * This function allocates and configures shared BGP resources, mainly listening
- * sockets. Should be called as the last step during initialization (when lock
- * is acquired and neighbor is ready). When error, caller should change state to
- * PS_DOWN and return immediately.
- */
-static int
-bgp_open(struct bgp_proto *p)
+static void bgp_graceful_restart_feed(struct bgp_channel *c);
+
+
+static inline int
+bgp_setup_auth(struct bgp_proto *p, int enable)
 {
-  struct bgp_socket *bs = NULL;
-  struct iface *ifa = p->cf->strict_bind ? p->cf->iface : NULL;
-  ip_addr addr = p->cf->strict_bind ? p->cf->local_ip :
-    (p->ipv4 ? IPA_NONE4 : IPA_NONE6);
-  uint port = p->cf->local_port;
+  /* Beware. This is done from main_birdloop and protocol birdloop is NOT ENTERED.
+   * Anyway, we are only accessing:
+   *  - protocol config which can be changed only from main_birdloop (reconfig)
+   *  - protocol listen socket which is always driven by main_birdloop
+   *  - protocol name which is set on reconfig
+   */
 
-  /* FIXME: Add some global init? */
-  if (!bgp_linpool)
-    init_list(&bgp_sockets);
+  if (p->cf->password && p->listen.sock)
+  {
+    ip_addr prefix = p->cf->remote_ip;
+    int pxlen = -1;
 
-  /* We assume that cf->iface is defined iff cf->local_ip is link-local */
-
-  WALK_LIST(bs, bgp_sockets)
-    if (ipa_equal(bs->sk->saddr, addr) && (bs->sk->sport == port) &&
-	(bs->sk->iface == ifa) && (bs->sk->vrf == p->p.vrf))
+    if (p->cf->remote_range)
     {
-      bs->uc++;
-      p->sock = bs;
-      return 0;
+      prefix = net_prefix(p->cf->remote_range);
+      pxlen = net_pxlen(p->cf->remote_range);
     }
 
-  sock *sk = sk_new(proto_pool);
-  sk->type = SK_TCP_PASSIVE;
-  sk->ttl = 255;
-  sk->saddr = addr;
-  sk->sport = port;
-  sk->iface = ifa;
-  sk->vrf = p->p.vrf;
-  sk->flags = 0;
-  sk->tos = IP_PREC_INTERNET_CONTROL;
-  sk->rbsize = BGP_RX_BUFFER_SIZE;
-  sk->tbsize = BGP_TX_BUFFER_SIZE;
-  sk->rx_hook = bgp_incoming_connection;
-  sk->err_hook = bgp_listen_sock_err;
+    int rv = sk_set_md5_auth(p->listen.sock->sk,
+			     p->cf->local_ip, prefix, pxlen, p->cf->iface,
+			     enable ? p->cf->password : NULL, p->cf->setkey);
 
-  if (sk_open(sk) < 0)
-    goto err;
+    if (rv < 0)
+      sk_log_error(p->listen.sock->sk, p->p.name);
 
-  bs = mb_allocz(proto_pool, sizeof(struct bgp_socket));
-  bs->sk = sk;
-  bs->uc = 1;
-  p->sock = bs;
-  sk->data = bs;
-
-  add_tail(&bgp_sockets, &bs->n);
-
-  if (!bgp_linpool)
-  {
-    bgp_linpool  = lp_new_default(proto_pool);
-    bgp_linpool2 = lp_new_default(proto_pool);
+    return rv;
   }
-
-  return 0;
-
-err:
-  sk_log_error(sk, p->p.name);
-  log(L_ERR "%s: Cannot open listening socket", p->p.name);
-  rfree(sk);
-  return -1;
+  else
+    return 0;
 }
 
 /**
@@ -221,59 +195,169 @@ err:
 static void
 bgp_close(struct bgp_proto *p)
 {
-  struct bgp_socket *bs = p->sock;
+  LOCK_DOMAIN(rtable, bgp_listen_domain);
 
-  ASSERT(bs && bs->uc);
+  struct bgp_listen_request *req = &p->listen;
+  struct bgp_socket *bs = req->sock;
 
-  if (--bs->uc)
-    return;
+  if (enlisted(&req->n))
+  {
+    /* Remove listen request from listen socket or pending list */
+    rem_node(&req->n);
 
-  rfree(bs->sk);
-  rem_node(&bs->n);
-  mb_free(bs);
+    if (bs)
+    {
+      /* Already had a socket. */
+      req->sock = NULL;
 
-  if (!EMPTY_LIST(bgp_sockets))
-    return;
+      /* Request listen socket cleanup */
+      if (bs && EMPTY_LIST(bs->requests))
+	ev_send(&global_event_list, &bgp_listen_event);
+    }
+  }
 
-  rfree(bgp_linpool);
-  bgp_linpool = NULL;
-
-  rfree(bgp_linpool2);
-  bgp_linpool2 = NULL;
+  UNLOCK_DOMAIN(rtable, bgp_listen_domain);
 }
 
-static inline int
-bgp_setup_auth(struct bgp_proto *p, int enable)
+/**
+ * bgp_open - open a BGP instance
+ * @p: BGP instance
+ *
+ * This function allocates and configures shared BGP resources, mainly listening
+ * sockets. Should be called as the last step during initialization (when lock
+ * is acquired and neighbor is ready). When error, caller should change state to
+ * PS_DOWN and return immediately.
+ */
+static void
+bgp_open(struct bgp_proto *p)
 {
-  if (p->cf->password)
-  {
-    ip_addr prefix = p->cf->remote_ip;
-    int pxlen = -1;
+  LOCK_DOMAIN(rtable, bgp_listen_domain);
 
-    if (p->cf->remote_range)
+  struct bgp_listen_request *req = &p->listen;
+  /* We assume that cf->iface is defined iff cf->local_ip is link-local */
+  req->iface = p->cf->strict_bind ? p->cf->iface : NULL;
+  req->vrf = p->p.vrf;
+  req->addr = p->cf->strict_bind ? p->cf->local_ip :
+    (p->ipv4 ? IPA_NONE4 : IPA_NONE6);
+  req->port = p->cf->local_port;
+  req->flags = p->cf->free_bind ? SKF_FREEBIND : 0;
+
+  BGP_TRACE(D_EVENTS, "Requesting listen socket at %I%J port %u", req->addr, req->iface, req->port);
+
+  add_tail(&bgp_listen_pending, &req->n);
+  ev_send(&global_event_list, &bgp_listen_event);
+
+  UNLOCK_DOMAIN(rtable, bgp_listen_domain);
+}
+
+static void
+bgp_listen_create(void *_ UNUSED)
+{
+  //ASSERT_DIE(birdloop_inside(&main_birdloop));
+  uint flag_mask = SKF_FREEBIND;
+
+  while (1) {
+    LOCK_DOMAIN(rtable, bgp_listen_domain);
+
+    if (EMPTY_LIST(bgp_listen_pending))
     {
-      prefix = net_prefix(p->cf->remote_range);
-      pxlen = net_pxlen(p->cf->remote_range);
+      UNLOCK_DOMAIN(rtable, bgp_listen_domain);
+      break;
     }
 
-    int rv = sk_set_md5_auth(p->sock->sk,
-			     p->cf->local_ip, prefix, pxlen, p->cf->iface,
-			     enable ? p->cf->password : NULL, p->cf->setkey);
+    /* Get the first request to match */
+    struct bgp_listen_request *req = HEAD(bgp_listen_pending);
+    struct bgp_proto *p = SKIP_BACK(struct bgp_proto, listen, req);
+    rem_node(&req->n);
 
-    if (rv < 0)
-      sk_log_error(p->sock->sk, p->p.name);
+    /* First try to find existing socket */
+    struct bgp_socket *bs;
+    WALK_LIST(bs, bgp_sockets)
+      if (ipa_equal(bs->sk->saddr, req->addr) &&
+	  (bs->sk->sport == req->port) &&
+	  (bs->sk->iface == req->iface) &&
+	  (bs->sk->vrf == req->vrf) &&
+	  ((bs->sk->flags & flag_mask) == req->flags))
+	break;
 
-    return rv;
+    /* Not found any */
+    if (NODE_VALID(bs))
+      BGP_TRACE(D_EVENTS, "Found a listening socket: %p", bs);
+    else
+    {
+      /* Allocating new socket from global protocol pool.
+       * We can do this in main_birdloop. */
+      sock *sk = sk_new(bgp_listen_pool);
+      sk->type = SK_TCP_PASSIVE;
+      sk->ttl = 255;
+      sk->saddr = req->addr;
+      sk->sport = req->port;
+      sk->iface = req->iface;
+      sk->vrf = req->vrf;
+      sk->flags = req->flags;
+      sk->tos = IP_PREC_INTERNET_CONTROL;
+      sk->rbsize = BGP_RX_BUFFER_SIZE;
+      sk->tbsize = BGP_TX_BUFFER_SIZE;
+      sk->rx_hook = bgp_incoming_connection;
+      sk->err_hook = bgp_listen_sock_err;
+
+      if (sk_open(sk, &main_birdloop) < 0)
+      {
+	sk_log_error(sk, p->p.name);
+	log(L_ERR "%s: Cannot open listening socket", p->p.name);
+	sk_close(sk);
+	UNLOCK_DOMAIN(rtable, bgp_listen_domain);
+
+	bgp_initiate_disable(p, BEM_NO_SOCKET);
+	continue;
+      }
+
+      bs = mb_allocz(bgp_listen_pool, sizeof(struct bgp_socket));
+      bs->sk = sk;
+      sk->data = bs;
+
+      init_list(&bs->requests);
+      add_tail(&bgp_sockets, &bs->n);
+
+      BGP_TRACE(D_EVENTS, "Created new listening socket: %p", bs);
+    }
+
+    req->sock = bs;
+    add_tail(&bs->requests, &req->n);
+
+    if (bgp_setup_auth(p, 1) < 0)
+    {
+      rem_node(&req->n);
+      req->sock = NULL;
+
+      UNLOCK_DOMAIN(rtable, bgp_listen_domain);
+
+      bgp_initiate_disable(p, BEM_INVALID_MD5);
+      continue;
+    }
+
+    UNLOCK_DOMAIN(rtable, bgp_listen_domain);
   }
-  else
-    return 0;
+
+  /* Cleanup leftover listening sockets */
+  LOCK_DOMAIN(rtable, bgp_listen_domain);
+  struct bgp_socket *bs;
+  node *nxt;
+  WALK_LIST_DELSAFE(bs, nxt, bgp_sockets)
+    if (EMPTY_LIST(bs->requests))
+    {
+      sk_close(bs->sk);
+      rem_node(&bs->n);
+      mb_free(bs);
+    }
+  UNLOCK_DOMAIN(rtable, bgp_listen_domain);
 }
 
 static inline struct bgp_channel *
 bgp_find_channel(struct bgp_proto *p, u32 afi)
 {
   struct bgp_channel *c;
-  WALK_LIST(c, p->p.channels)
+  BGP_WALK_CHANNELS(p, c)
     if (c->afi == afi)
       return c;
 
@@ -292,6 +376,8 @@ bgp_startup(struct bgp_proto *p)
   if (p->postponed_sk)
   {
     /* Apply postponed incoming connection */
+    sk_reloop(p->postponed_sk, p->p.loop);
+
     bgp_setup_conn(p, &p->incoming_conn);
     bgp_setup_sk(&p->incoming_conn, p->postponed_sk);
     bgp_send_open(&p->incoming_conn);
@@ -309,13 +395,7 @@ bgp_startup_timeout(timer *t)
 static void
 bgp_initiate(struct bgp_proto *p)
 {
-  int err_val;
-
-  if (bgp_open(p) < 0)
-  { err_val = BEM_NO_SOCKET; goto err1; }
-
-  if (bgp_setup_auth(p, 1) < 0)
-  { err_val = BEM_INVALID_MD5; goto err2; }
+  bgp_open(p);
 
   if (p->cf->bfd)
     bgp_update_bfd(p, p->cf->bfd);
@@ -324,21 +404,28 @@ bgp_initiate(struct bgp_proto *p)
   {
     p->start_state = BSS_DELAY;
     BGP_TRACE(D_EVENTS, "Startup delayed by %d seconds due to errors", p->startup_delay);
-    bgp_start_timer(p->startup_timer, p->startup_delay);
+    bgp_start_timer(p, p->startup_timer, p->startup_delay);
   }
   else
     bgp_startup(p);
+}
 
-  return;
-
-err2:
-  bgp_close(p);
-err1:
-  p->p.disabled = 1;
-  bgp_store_error(p, NULL, BE_MISC, err_val);
-  proto_notify_state(&p->p, PS_DOWN);
-
-  return;
+static void
+bgp_initiate_disable(struct bgp_proto *p, int err_val)
+{
+  PROTO_LOCKED_FROM_MAIN(&p->p)
+  {
+    /* The protocol may be already down for another reason.
+     * Shutdown the protocol only if it isn't already shutting down. */
+    switch (p->p.proto_state)
+    {
+      case PS_START:
+      case PS_UP:
+	p->p.disabled = 1;
+	bgp_store_error(p, NULL, BE_MISC, err_val);
+	bgp_stop(p, err_val, NULL, 0);
+    }
+  }
 }
 
 /**
@@ -351,14 +438,14 @@ err1:
  * timers.
  */
 void
-bgp_start_timer(timer *t, uint value)
+bgp_start_timer(struct bgp_proto *p, timer *t, uint value)
 {
   if (value)
   {
     /* The randomization procedure is specified in RFC 4271 section 10 */
     btime time = value S;
     btime randomize = random() % ((time / 4) + 1);
-    tm_start(t, time - randomize);
+    tm_start_in(t, time - randomize, p->p.loop);
   }
   else
     tm_stop(t);
@@ -385,9 +472,11 @@ bgp_close_conn(struct bgp_conn *conn)
   conn->keepalive_timer = NULL;
   rfree(conn->hold_timer);
   conn->hold_timer = NULL;
+
   rfree(conn->tx_ev);
   conn->tx_ev = NULL;
-  rfree(conn->sk);
+
+  sk_close(conn->sk);
   conn->sk = NULL;
 
   mb_free(conn->local_caps);
@@ -472,6 +561,8 @@ bgp_down(struct bgp_proto *p)
     bgp_close(p);
   }
 
+  p->neigh = NULL;
+
   BGP_TRACE(D_EVENTS, "Down");
   proto_notify_state(&p->p, PS_DOWN);
 }
@@ -521,9 +612,16 @@ void
 bgp_stop(struct bgp_proto *p, int subcode, byte *data, uint len)
 {
   proto_notify_state(&p->p, PS_STOP);
+  p->uncork_ev->data = NULL;
   bgp_graceful_close_conn(&p->outgoing_conn, subcode, data, len);
   bgp_graceful_close_conn(&p->incoming_conn, subcode, data, len);
-  ev_schedule(p->event);
+
+  struct bgp_channel *c;
+  WALK_LIST(c, p->p.channels)
+    if (c->ptx)
+      bgp_free_pending_tx(c);
+
+  proto_send_event(&p->p, p->event);
 }
 
 static inline void
@@ -595,7 +693,7 @@ bgp_conn_enter_established_state(struct bgp_conn *conn)
   /* Summary state of ADD_PATH RX for active channels */
   uint summary_add_path_rx = 0;
 
-  WALK_LIST(c, p->p.channels)
+  BGP_WALK_CHANNELS(p, c)
   {
     const struct bgp_af_caps *loc = bgp_find_af_caps(local, c->afi);
     const struct bgp_af_caps *rem = bgp_find_af_caps(peer,  c->afi);
@@ -616,7 +714,7 @@ bgp_conn_enter_established_state(struct bgp_conn *conn)
 
     int active = loc->ready && rem->ready;
     c->c.disabled = !active;
-    c->c.reloadable = p->route_refresh || c->cf->import_table;
+    c->c.reloadable = p->route_refresh || ((c->c.in_keep & RIK_PREFILTER) == RIK_PREFILTER);
 
     c->index = active ? num++ : 0;
 
@@ -677,7 +775,7 @@ bgp_conn_enter_established_state(struct bgp_conn *conn)
   p->channel_count = num;
   p->summary_add_path_rx = summary_add_path_rx;
 
-  WALK_LIST(c, p->p.channels)
+  BGP_WALK_CHANNELS(p, c)
   {
     if (c->c.disabled)
       continue;
@@ -714,7 +812,7 @@ bgp_conn_enter_close_state(struct bgp_conn *conn)
   conn->sk->rx_hook = NULL;
 
   /* Timeout for CLOSE state, if we cannot send notification soon then we just hangup */
-  bgp_start_timer(conn->hold_timer, 10);
+  bgp_start_timer(p, conn->hold_timer, 10);
 
   if (os == BS_ESTABLISHED)
     bgp_conn_leave_established_state(p);
@@ -728,7 +826,7 @@ bgp_conn_enter_idle_state(struct bgp_conn *conn)
 
   bgp_close_conn(conn);
   bgp_conn_set_state(conn, BS_IDLE);
-  ev_schedule(p->event);
+  proto_send_event(&p->p, p->event);
 
   if (os == BS_ESTABLISHED)
     bgp_conn_leave_established_state(p);
@@ -756,7 +854,7 @@ bgp_handle_graceful_restart(struct bgp_proto *p)
   p->gr_active_num = 0;
 
   struct bgp_channel *c;
-  WALK_LIST(c, p->p.channels)
+  BGP_WALK_CHANNELS(p, c)
   {
     /* FIXME: perhaps check for channel state instead of disabled flag? */
     if (c->c.disabled)
@@ -770,32 +868,28 @@ bgp_handle_graceful_restart(struct bgp_proto *p)
       {
       case BGP_GRS_NONE:
 	c->gr_active = BGP_GRS_ACTIVE;
-	rt_refresh_begin(c->c.table, &c->c);
-	break;
+	/* fall through */
 
       case BGP_GRS_ACTIVE:
-	rt_refresh_end(c->c.table, &c->c);
-	rt_refresh_begin(c->c.table, &c->c);
+	rt_refresh_begin(&c->c.in_req);
 	break;
 
       case BGP_GRS_LLGR:
-	rt_refresh_begin(c->c.table, &c->c);
-	rt_modify_stale(c->c.table, &c->c);
+	rt_refresh_begin(&c->c.in_req);
+	bgp_graceful_restart_feed(c);
 	break;
       }
     }
     else
     {
       /* Just flush the routes */
-      rt_refresh_begin(c->c.table, &c->c);
-      rt_refresh_end(c->c.table, &c->c);
+      rt_refresh_begin(&c->c.in_req);
+      rt_refresh_end(&c->c.in_req);
     }
 
     /* Reset bucket and prefix tables */
-    bgp_free_bucket_table(c);
-    bgp_free_prefix_table(c);
-    bgp_init_bucket_table(c);
-    bgp_init_prefix_table(c);
+    bgp_free_pending_tx(c);
+    bgp_init_pending_tx(c);
     c->packets_to_send = 0;
   }
 
@@ -803,8 +897,57 @@ bgp_handle_graceful_restart(struct bgp_proto *p)
   ASSERT(p->gr_active_num > 0);
 
   proto_notify_state(&p->p, PS_START);
-  tm_start(p->gr_timer, p->conn->remote_caps->gr_time S);
+  tm_start_in(p->gr_timer, p->conn->remote_caps->gr_time S, p->p.loop);
 }
+
+static void
+bgp_graceful_restart_feed_done(struct rt_export_request *req)
+{
+  req->hook = NULL;
+}
+
+static void
+bgp_graceful_restart_feed_dump_req(struct rt_export_request *req)
+{
+  struct bgp_channel *c = SKIP_BACK(struct bgp_channel, stale_feed, req);
+  debug("  BGP-GR %s.%s export request %p\n", c->c.proto->name, c->c.name, req);
+}
+
+static void
+bgp_graceful_restart_feed_log_state_change(struct rt_export_request *req, u8 state)
+{
+  struct bgp_channel *c = SKIP_BACK(struct bgp_channel, stale_feed, req);
+  struct bgp_proto *p = (void *) c->c.proto;
+  BGP_TRACE(D_EVENTS, "Long-lived graceful restart export state changed to %s", rt_export_state_name(state));
+
+  if (state == TES_READY)
+    rt_stop_export(req, bgp_graceful_restart_feed_done);
+}
+
+static void
+bgp_graceful_restart_drop_export(struct rt_export_request *req UNUSED, const net_addr *n UNUSED, struct rt_pending_export *rpe UNUSED)
+{ /* Nothing to do */ }
+
+static void
+bgp_graceful_restart_feed(struct bgp_channel *c)
+{
+  c->stale_feed = (struct rt_export_request) {
+    .name = "BGP-GR",
+    .list = proto_event_list(c->c.proto),
+    .pool = c->c.proto->pool,
+    .feed_block_size = c->c.feed_block_size,
+    .trace_routes = c->c.debug | c->c.proto->debug,
+    .dump_req = bgp_graceful_restart_feed_dump_req,
+    .log_state_change = bgp_graceful_restart_feed_log_state_change,
+    .export_bulk = bgp_rte_modify_stale,
+    .export_one = bgp_graceful_restart_drop_export,
+  };
+
+  rt_request_export(c->c.table, &c->stale_feed);
+}
+
+
+
 
 /**
  * bgp_graceful_restart_done - finish active BGP graceful restart
@@ -829,7 +972,7 @@ bgp_graceful_restart_done(struct bgp_channel *c)
     BGP_TRACE(D_EVENTS, "Neighbor graceful restart done");
 
   tm_stop(c->stale_timer);
-  rt_refresh_end(c->c.table, &c->c);
+  rt_refresh_end(&c->c.in_req);
 }
 
 /**
@@ -851,7 +994,7 @@ bgp_graceful_restart_timeout(timer *t)
   if (p->llgr_ready)
   {
     struct bgp_channel *c;
-    WALK_LIST(c, p->p.channels)
+    BGP_WALK_CHANNELS(p, c)
     {
       /* Channel is not in GR and is already flushed */
       if (!c->gr_active)
@@ -870,8 +1013,8 @@ bgp_graceful_restart_timeout(timer *t)
 
       /* Channel is in GR, and supports LLGR -> start LLGR */
       c->gr_active = BGP_GRS_LLGR;
-      tm_start(c->stale_timer, c->stale_time S);
-      rt_modify_stale(c->c.table, &c->c);
+      tm_start_in(c->stale_timer, c->stale_time S, p->p.loop);
+      bgp_graceful_restart_feed(c);
     }
   }
   else
@@ -909,10 +1052,7 @@ bgp_refresh_begin(struct bgp_channel *c)
   { log(L_WARN "%s: BEGIN-OF-RR received before END-OF-RIB, ignoring", p->p.name); return; }
 
   c->load_state = BFS_REFRESHING;
-  rt_refresh_begin(c->c.table, &c->c);
-
-  if (c->c.in_table)
-    rt_refresh_begin(c->c.in_table, &c->c);
+  rt_refresh_begin(&c->c.in_req);
 }
 
 /**
@@ -933,10 +1073,7 @@ bgp_refresh_end(struct bgp_channel *c)
   { log(L_WARN "%s: END-OF-RR received without prior BEGIN-OF-RR, ignoring", p->p.name); return; }
 
   c->load_state = BFS_NONE;
-  rt_refresh_end(c->c.table, &c->c);
-
-  if (c->c.in_table)
-    rt_prune_sync(c->c.in_table, 0);
+  rt_refresh_end(&c->c.in_req);
 }
 
 
@@ -950,7 +1087,7 @@ bgp_send_open(struct bgp_conn *conn)
   bgp_prepare_capabilities(conn);
   bgp_schedule_packet(conn, NULL, PKT_OPEN);
   bgp_conn_set_state(conn, BS_OPENSENT);
-  bgp_start_timer(conn->hold_timer, conn->bgp->cf->initial_hold_time);
+  bgp_start_timer(conn->bgp, conn->hold_timer, conn->bgp->cf->initial_hold_time);
 }
 
 static void
@@ -1027,7 +1164,7 @@ bgp_hold_timeout(timer *t)
      and perhaps just not processed BGP packets in time. */
 
   if (sk_rx_ready(conn->sk) > 0)
-    bgp_start_timer(conn->hold_timer, 10);
+    bgp_start_timer(p, conn->hold_timer, 10);
   else if ((conn->state == BS_ESTABLISHED) && p->llgr_ready)
   {
     BGP_TRACE(D_EVENTS, "Hold timer expired");
@@ -1087,7 +1224,7 @@ bgp_active(struct bgp_proto *p)
   BGP_TRACE(D_EVENTS, "Connect delayed by %d seconds", delay);
   bgp_setup_conn(p, conn);
   bgp_conn_set_state(conn, BS_ACTIVE);
-  bgp_start_timer(conn->connect_timer, delay);
+  bgp_start_timer(p, conn->connect_timer, delay);
 }
 
 /**
@@ -1118,6 +1255,7 @@ bgp_connect(struct bgp_proto *p)	/* Enter Connect state and start establishing c
   s->tos = IP_PREC_INTERNET_CONTROL;
   s->password = p->cf->password;
   s->tx_hook = bgp_connected;
+  s->flags = p->cf->free_bind ? SKF_FREEBIND : 0;
   BGP_TRACE(D_EVENTS, "Connecting to %I%J from local address %I%J",
 	    s->daddr, ipa_is_link_local(s->daddr) ? p->cf->iface : NULL,
 	    s->saddr, ipa_is_link_local(s->saddr) ? s->iface : NULL);
@@ -1125,7 +1263,7 @@ bgp_connect(struct bgp_proto *p)	/* Enter Connect state and start establishing c
   bgp_setup_sk(conn, s);
   bgp_conn_set_state(conn, BS_CONNECT);
 
-  if (sk_open(s) < 0)
+  if (sk_open(s, p->p.loop) < 0)
     goto err;
 
   /* Set minimal receive TTL if needed */
@@ -1134,7 +1272,7 @@ bgp_connect(struct bgp_proto *p)	/* Enter Connect state and start establishing c
       goto err;
 
   DBG("BGP: Waiting for connect success\n");
-  bgp_start_timer(conn->connect_timer, p->cf->connect_retry_time);
+  bgp_start_timer(p, conn->connect_timer, p->cf->connect_retry_time);
   return;
 
 err:
@@ -1155,12 +1293,17 @@ static struct bgp_proto *
 bgp_find_proto(sock *sk)
 {
   struct bgp_proto *best = NULL;
-  struct bgp_proto *p;
+  struct bgp_socket *bs = sk->data;
+  struct bgp_listen_request *req;
 
   /* sk->iface is valid only if src or dst address is link-local */
   int link = ipa_is_link_local(sk->saddr) || ipa_is_link_local(sk->daddr);
 
-  WALK_LIST(p, proto_list)
+  LOCK_DOMAIN(rtable, bgp_listen_domain);
+
+  WALK_LIST(req, bs->requests)
+  {
+    struct bgp_proto *p = SKIP_BACK(struct bgp_proto, listen, req);
     if ((p->p.proto == &proto_bgp) &&
 	(ipa_equal(p->remote_ip, sk->daddr) || bgp_is_dynamic(p)) &&
 	(!p->cf->remote_range || ipa_in_netX(sk->daddr, p->cf->remote_range)) &&
@@ -1174,7 +1317,9 @@ bgp_find_proto(sock *sk)
       if (!bgp_is_dynamic(p))
 	break;
     }
+  }
 
+  UNLOCK_DOMAIN(rtable, bgp_listen_domain);
   return best;
 }
 
@@ -1193,6 +1338,8 @@ bgp_find_proto(sock *sk)
 static int
 bgp_incoming_connection(sock *sk, uint dummy UNUSED)
 {
+  ASSERT_DIE(birdloop_inside(&main_birdloop));
+
   struct bgp_proto *p;
   int acc, hops;
 
@@ -1202,9 +1349,13 @@ bgp_incoming_connection(sock *sk, uint dummy UNUSED)
   {
     log(L_WARN "BGP: Unexpected connect from unknown address %I%J (port %d)",
 	sk->daddr, ipa_is_link_local(sk->daddr) ? sk->iface : NULL, sk->dport);
-    rfree(sk);
+    LOCK_DOMAIN(rtable, bgp_listen_domain);
+    sk_close(sk);
+    UNLOCK_DOMAIN(rtable, bgp_listen_domain);
     return 0;
   }
+
+  birdloop_enter(p->p.loop);
 
   /*
    * BIRD should keep multiple incoming connections in OpenSent state (for
@@ -1228,14 +1379,16 @@ bgp_incoming_connection(sock *sk, uint dummy UNUSED)
       bgp_close_conn(&p->incoming_conn);
   }
 
+  LOCK_DOMAIN(rtable, bgp_listen_domain);
+
   BGP_TRACE(D_EVENTS, "Incoming connection from %I%J (port %d) %s",
 	    sk->daddr, ipa_is_link_local(sk->daddr) ? sk->iface : NULL,
 	    sk->dport, acc ? "accepted" : "rejected");
 
   if (!acc)
   {
-    rfree(sk);
-    return 0;
+    sk_close(sk);
+    goto leave;
   }
 
   hops = p->cf->multihop ? : 1;
@@ -1260,19 +1413,25 @@ bgp_incoming_connection(sock *sk, uint dummy UNUSED)
     p = bgp_spawn(p, sk->daddr);
     p->postponed_sk = sk;
     rmove(sk, p->p.pool);
-    return 0;
+    goto leave;
   }
 
   rmove(sk, p->p.pool);
+  sk_reloop(sk, p->p.loop);
+
   bgp_setup_conn(p, &p->incoming_conn);
   bgp_setup_sk(&p->incoming_conn, sk);
   bgp_send_open(&p->incoming_conn);
-  return 0;
+  goto leave;
 
 err:
   sk_log_error(sk, p->p.name);
   log(L_ERR "%s: Incoming connection aborted", p->p.name);
-  rfree(sk);
+  sk_close(sk);
+
+leave:
+  UNLOCK_DOMAIN(rtable, bgp_listen_domain);
+  birdloop_leave(p->p.loop);
   return 0;
 }
 
@@ -1357,7 +1516,7 @@ bgp_bfd_notify(struct bfd_request *req)
     BGP_TRACE(D_EVENTS, "BFD session down");
     bgp_store_error(p, NULL, BE_MISC, BEM_BFD_DOWN);
 
-    if (p->cf->bfd == BGP_BFD_GRACEFUL)
+    if (req->opts.mode == BGP_BFD_GRACEFUL)
     {
       /* Trigger graceful restart */
       if (p->conn && (p->conn->state == BS_ESTABLISHED) && p->gr_ready)
@@ -1380,15 +1539,25 @@ bgp_bfd_notify(struct bfd_request *req)
 }
 
 static void
-bgp_update_bfd(struct bgp_proto *p, int use_bfd)
+bgp_update_bfd(struct bgp_proto *p, const struct bfd_options *bfd)
 {
-  if (use_bfd && !p->bfd_req && !bgp_is_dynamic(p))
+  if (bfd && p->bfd_req)
+  {
+    BGP_TRACE(D_EVENTS, "Updating existing BFD request");
+    bfd_update_request(p->bfd_req, bfd);
+  }
+
+  if (bfd && !p->bfd_req && !bgp_is_dynamic(p))
+  {
     p->bfd_req = bfd_request_session(p->p.pool, p->remote_ip, p->local_ip,
 				     p->cf->multihop ? NULL : p->neigh->iface,
-				     p->p.vrf, bgp_bfd_notify, p);
+				     p->p.vrf, bgp_bfd_notify, p, p->p.loop, bfd);
+    BGP_TRACE(D_EVENTS, "Requesting a new BFD session");
+  }
 
-  if (!use_bfd && p->bfd_req)
+  if (!bfd && p->bfd_req)
   {
+    BGP_TRACE(D_EVENTS, "Retracting the BFD request");
     rfree(p->bfd_req);
     p->bfd_req = NULL;
   }
@@ -1400,12 +1569,12 @@ bgp_reload_routes(struct channel *C)
   struct bgp_proto *p = (void *) C->proto;
   struct bgp_channel *c = (void *) C;
 
-  ASSERT(p->conn && (p->route_refresh || c->c.in_table));
+  /* Ignore non-BGP channels */
+  if (C->channel != &channel_bgp)
+    return;
 
-  if (c->c.in_table)
-    channel_schedule_reload(C);
-  else
-    bgp_schedule_packet(p->conn, c, PKT_ROUTE_REFRESH);
+  ASSERT(p->conn && p->route_refresh);
+  bgp_schedule_packet(p->conn, c, PKT_ROUTE_REFRESH);
 }
 
 static void
@@ -1414,12 +1583,22 @@ bgp_feed_begin(struct channel *C, int initial)
   struct bgp_proto *p = (void *) C->proto;
   struct bgp_channel *c = (void *) C;
 
+  /* Ignore non-BGP channels */
+  if (C->channel != &channel_bgp)
+    return;
+
   /* This should not happen */
   if (!p->conn)
     return;
 
   if (initial && p->cf->gr_mode)
     c->feed_state = BFS_LOADING;
+
+  if (!initial && C->out_table)
+  {
+    c->feed_out_table = 1;
+    return;
+  }
 
   /* It is refeed and both sides support enhanced route refresh */
   if (!initial && p->enhanced_refresh)
@@ -1438,6 +1617,16 @@ bgp_feed_end(struct channel *C)
 {
   struct bgp_proto *p = (void *) C->proto;
   struct bgp_channel *c = (void *) C;
+
+  /* Ignore non-BGP channels */
+  if (C->channel != &channel_bgp)
+    return;
+
+  if (c->feed_out_table)
+  {
+    c->feed_out_table = 0;
+    return;
+  }
 
   /* This should not happen */
   if (!p->conn)
@@ -1460,10 +1649,22 @@ bgp_feed_end(struct channel *C)
 }
 
 
+
+
+
+
+
+
+
+
 static void
-bgp_start_locked(struct object_lock *lock)
+bgp_start_locked(void *_p)
 {
-  struct bgp_proto *p = lock->data;
+
+  pthread_mutex_lock(&bgp_lock);
+
+
+  struct bgp_proto *p = _p;
   const struct bgp_config *cf = p->cf;
 
   if (p->p.proto_state != PS_START)
@@ -1500,6 +1701,7 @@ bgp_start_locked(struct object_lock *lock)
     BGP_TRACE(D_EVENTS, "Waiting for link on %s", n->iface->name);
   else
     bgp_start_neighbor(p);
+  pthread_mutex_unlock(&bgp_lock);
 }
 
 static int
@@ -1539,6 +1741,8 @@ bgp_start(struct proto *P)
   p->last_rx_update = 0;
 
   p->event = ev_new_init(p->p.pool, bgp_decision, p);
+  p->uncork_ev = ev_new_init(p->p.pool, bgp_uncork, p);
+
   p->startup_timer = tm_new_init(p->p.pool, bgp_startup_timeout, p, 0, 0);
   p->gr_timer = tm_new_init(p->p.pool, bgp_graceful_restart_timeout, p, 0, 0);
 
@@ -1553,7 +1757,7 @@ bgp_start(struct proto *P)
   if (p->p.gr_recovery && p->cf->gr_mode)
   {
     struct bgp_channel *c;
-    WALK_LIST(c, p->p.channels)
+    BGP_WALK_CHANNELS(p, c)
       channel_graceful_restart_lock(&c->c);
   }
 
@@ -1562,14 +1766,17 @@ bgp_start(struct proto *P)
    * so that we are the only instance attempting to talk with that neighbor.
    */
   struct object_lock *lock;
-  lock = p->lock = olock_new(P->pool);
+  lock = p->lock = olock_new(P->pool_fragile);
   lock->addr = p->remote_ip;
   lock->port = p->cf->remote_port;
   lock->iface = p->cf->iface;
   lock->vrf = p->cf->iface ? NULL : p->p.vrf;
   lock->type = OBJLOCK_TCP;
-  lock->hook = bgp_start_locked;
-  lock->data = p;
+  lock->event = (event) {
+    .hook = bgp_start_locked,
+    .data = p,
+  };
+  lock->target = proto_event_list(P);
 
   /* For dynamic BGP, we use inst 1 to avoid collisions with regular BGP */
   if (bgp_is_dynamic(p))
@@ -1669,6 +1876,13 @@ done:
   return p->p.proto_state;
 }
 
+struct rte_owner_class bgp_rte_owner_class = {
+  .get_route_info = 	bgp_get_route_info,
+  .rte_better =		bgp_rte_better,
+  .rte_mergable =	bgp_rte_mergable,
+  .rte_igp_metric =	bgp_rte_igp_metric,
+};
+
 static struct proto *
 bgp_init(struct proto_config *CF)
 {
@@ -1678,14 +1892,13 @@ bgp_init(struct proto_config *CF)
 
   P->rt_notify = bgp_rt_notify;
   P->preexport = bgp_preexport;
-  P->neigh_notify = bgp_neigh_notify;
+  P->iface_sub.neigh_notify = bgp_neigh_notify;
   P->reload_routes = bgp_reload_routes;
   P->feed_begin = bgp_feed_begin;
   P->feed_end = bgp_feed_end;
-  P->rte_better = bgp_rte_better;
-  P->rte_mergable = bgp_rte_mergable;
-  P->rte_recalculate = cf->deterministic_med ? bgp_rte_recalculate : NULL;
-  P->rte_modify = bgp_rte_modify_stale;
+
+  P->sources.class = &bgp_rte_owner_class;
+  P->sources.rte_recalculate = cf->deterministic_med ? bgp_rte_recalculate : NULL;
 
   p->cf = cf;
   p->is_internal = (cf->local_as == cf->remote_as);
@@ -1706,7 +1919,7 @@ bgp_init(struct proto_config *CF)
 
   /* Add all channels */
   struct bgp_channel_config *cc;
-  WALK_LIST(cc, CF->channels)
+  BGP_CF_WALK_CHANNELS(cf, cc)
     proto_add_channel(P, &cc->c);
 
   return P;
@@ -1727,6 +1940,9 @@ bgp_channel_init(struct channel *C, struct channel_config *CF)
 
   if (cf->igp_table_ip6)
     c->igp_table_ip6 = cf->igp_table_ip6->table;
+
+  if (cf->base_table)
+    c->base_table = cf->base_table->table;
 }
 
 static int
@@ -1742,15 +1958,18 @@ bgp_channel_start(struct channel *C)
   if (c->igp_table_ip6)
     rt_lock_table(c->igp_table_ip6);
 
-  c->pool = p->p.pool; // XXXX
-  bgp_init_bucket_table(c);
-  bgp_init_prefix_table(c);
+  if (c->base_table)
+  {
+    rt_lock_table(c->base_table);
+    rt_flowspec_link(c->base_table, c->c.table);
+  }
 
-  if (c->cf->import_table)
-    channel_setup_in_table(C);
+  c->pool = p->p.pool; // XXXX
 
   if (c->cf->export_table)
-    channel_setup_out_table(C);
+    bgp_setup_out_table(c);
+
+  bgp_init_pending_tx(c);
 
   c->stale_timer = tm_new_init(c->pool, bgp_long_lived_stale_timeout, c, 0, 0);
 
@@ -1826,6 +2045,12 @@ bgp_channel_cleanup(struct channel *C)
   if (c->igp_table_ip6)
     rt_unlock_table(c->igp_table_ip6);
 
+  if (c->base_table)
+  {
+    rt_flowspec_unlink(c->base_table, c->c.table);
+    rt_unlock_table(c->base_table);
+  }
+
   c->index = 0;
 
   /* Cleanup rest of bgp_channel starting at pool field */
@@ -1837,7 +2062,7 @@ bgp_find_channel_config(struct bgp_config *cf, u32 afi)
 {
   struct bgp_channel_config *cc;
 
-  WALK_LIST(cc, cf->c.channels)
+  BGP_CF_WALK_CHANNELS(cf, cc)
     if (cc->afi == afi)
       return cc;
 
@@ -1867,12 +2092,31 @@ bgp_default_igp_table(struct bgp_config *cf, struct bgp_channel_config *cc, u32 
     return cc2->c.table;
 
   /* Last, try default table of given type */
-  if (tab = cf->c.global->def_tables[type])
+  if (tab = rt_get_default_table(cf->c.global, type))
     return tab;
 
   cf_error("Undefined IGP table");
 }
 
+static struct rtable_config *
+bgp_default_base_table(struct bgp_config *cf, struct bgp_channel_config *cc)
+{
+  /* Expected table type */
+  u32 type = (cc->afi == BGP_AF_FLOW4) ? NET_IP4 : NET_IP6;
+
+  /* First, try appropriate IP channel */
+  u32 afi2 = BGP_AF(BGP_AFI(cc->afi), BGP_SAFI_UNICAST);
+  struct bgp_channel_config *cc2 = bgp_find_channel_config(cf, afi2);
+  if (cc2 && (cc2->c.table->addr_type == type))
+    return cc2->c.table;
+
+  /* Last, try default table of given type */
+  struct rtable_config *tab = rt_get_default_table(cf->c.global, type);
+  if (tab)
+    return tab;
+
+  cf_error("Undefined base table");
+}
 
 void
 bgp_postconfig(struct proto_config *CF)
@@ -1935,6 +2179,15 @@ bgp_postconfig(struct proto_config *CF)
   if (internal && cf->rs_client)
     cf_error("Only external neighbor can be RS client");
 
+  if (internal && (cf->local_role != BGP_ROLE_UNDEFINED))
+    cf_error("Local role cannot be set on IBGP sessions");
+
+  if (interior && (cf->local_role != BGP_ROLE_UNDEFINED))
+    log(L_WARN "BGP roles are not recommended to be used within AS confederations");
+
+  if (cf->require_roles && (cf->local_role == BGP_ROLE_UNDEFINED))
+    cf_error("Local role must be set if roles are required");
+
   if (!cf->confederation && cf->confederation_member)
     cf_error("Confederation ID must be set for member sessions");
 
@@ -1957,9 +2210,24 @@ bgp_postconfig(struct proto_config *CF)
   if (internal && cf->enforce_first_as)
     cf_error("Enforce first AS check is requires EBGP sessions");
 
+  if (cf->keepalive_time > cf->hold_time)
+    cf_error("Keepalive time must be at most hold time");
+
+  if (cf->keepalive_time > (cf->hold_time / 2))
+    log(L_WARN "Keepalive time should be at most 1/2 of hold time");
+
+  if (cf->min_hold_time > cf->hold_time)
+    cf_error("Min hold time (%u) exceeds hold time (%u)",
+	     cf->min_hold_time, cf->hold_time);
+
+  uint keepalive_time = cf->keepalive_time ?: cf->hold_time / 3;
+  if (cf->min_keepalive_time > keepalive_time)
+    cf_error("Min keepalive time (%u) exceeds keepalive time (%u)",
+	     cf->min_keepalive_time, keepalive_time);
+
 
   struct bgp_channel_config *cc;
-  WALK_LIST(cc, CF->channels)
+  BGP_CF_WALK_CHANNELS(cf, cc)
   {
     /* Handle undefined import filter */
     if (cc->c.in_filter == FILTER_UNDEF)
@@ -1983,13 +2251,13 @@ bgp_postconfig(struct proto_config *CF)
     if (cc->next_hop_keep == 0xff)
       cc->next_hop_keep = cf->rr_client ? NH_IBGP : (cf->rs_client ? NH_ALL : NH_NO);
 
-    /* Different default based on rs_client */
-    if (!cc->missing_lladdr)
-      cc->missing_lladdr = cf->rs_client ? MLL_IGNORE : MLL_SELF;
-
     /* Different default for gw_mode */
     if (!cc->gw_mode)
       cc->gw_mode = cf->multihop ? GW_RECURSIVE : GW_DIRECT;
+
+    /* Different default for next_hop_prefer */
+    if (!cc->next_hop_prefer)
+      cc->next_hop_prefer = (cc->gw_mode == GW_DIRECT) ? NHP_GLOBAL : NHP_LOCAL;
 
     /* Defaults based on proto config */
     if (cc->gr_able == 0xff)
@@ -2020,6 +2288,14 @@ bgp_postconfig(struct proto_config *CF)
       if (cc->igp_table_ip6 && bgp_cc_is_ipv4(cc) && !cc->ext_next_hop)
 	cf_error("Mismatched IGP table type");
     }
+
+    /* Default value of base table */
+    if ((BGP_SAFI(cc->afi) == BGP_SAFI_FLOW) && cc->validate && !cc->base_table)
+      cc->base_table = bgp_default_base_table(cf, cc);
+
+    if (cc->base_table && !cc->base_table->trie_used)
+      cf_error("Flowspec validation requires base table (%s) with trie",
+	       cc->base_table->name);
 
     if (cf->multihop && (cc->gw_mode == GW_DIRECT))
       cf_error("Multihop BGP cannot use direct gateway mode");
@@ -2062,19 +2338,15 @@ bgp_reconfigure(struct proto *P, struct proto_config *CF)
   WALK_LIST(C, p->p.channels)
     C->stale = 1;
 
-  WALK_LIST(cc, new->c.channels)
+  BGP_CF_WALK_CHANNELS(new, cc)
   {
     C = (struct channel *) bgp_find_channel(p, cc->afi);
     same = proto_configure_channel(P, &C, &cc->c) && same;
-
-    if (C)
-      C->stale = 0;
   }
 
   WALK_LIST_DELSAFE(C, C2, p->p.channels)
     if (C->stale)
       same = proto_configure_channel(P, &C, NULL) && same;
-
 
   if (same && (p->start_state > BSS_PREPARE))
     bgp_update_bfd(p, new->bfd);
@@ -2089,7 +2361,7 @@ bgp_reconfigure(struct proto *P, struct proto_config *CF)
   return same;
 }
 
-#define IGP_TABLE(cf, sym) ((cf)->igp_table_##sym ? (cf)->igp_table_##sym ->table : NULL )
+#define TABLE(cf, NAME) ((cf)->NAME ? (cf)->NAME->table : NULL )
 
 static int
 bgp_channel_reconfigure(struct channel *C, struct channel_config *CC, int *import_changed, int *export_changed)
@@ -2100,35 +2372,38 @@ bgp_channel_reconfigure(struct channel *C, struct channel_config *CC, int *impor
   struct bgp_channel_config *old = c->cf;
 
   if ((new->secondary != old->secondary) ||
+      (new->validate != old->validate) ||
       (new->gr_able != old->gr_able) ||
       (new->llgr_able != old->llgr_able) ||
       (new->llgr_time != old->llgr_time) ||
       (new->ext_next_hop != old->ext_next_hop) ||
       (new->add_path != old->add_path) ||
-      (new->import_table != old->import_table) ||
       (new->export_table != old->export_table) ||
-      (IGP_TABLE(new, ip4) != IGP_TABLE(old, ip4)) ||
-      (IGP_TABLE(new, ip6) != IGP_TABLE(old, ip6)))
+      (TABLE(new, igp_table_ip4) != TABLE(old, igp_table_ip4)) ||
+      (TABLE(new, igp_table_ip6) != TABLE(old, igp_table_ip6)) ||
+      (TABLE(new, base_table) != TABLE(old, base_table)))
     return 0;
 
   if (new->mandatory && !old->mandatory && (C->channel_state != CS_UP))
     return 0;
 
   if ((new->gw_mode != old->gw_mode) ||
+      (new->next_hop_prefer != old->next_hop_prefer) ||
       (new->aigp != old->aigp) ||
       (new->cost != old->cost))
   {
-    /* import_changed itself does not force ROUTE_REFRESH when import_table is active */
-    if (c->c.in_table && (c->c.channel_state == CS_UP))
+    /* If import table is active and route refresh is possible, we just ask for route refresh */
+    if ((c->c.in_keep & RIK_PREFILTER) && (c->c.channel_state == CS_UP) && p->route_refresh)
       bgp_schedule_packet(p->conn, c, PKT_ROUTE_REFRESH);
 
-    *import_changed = 1;
+    /* Otherwise we do complete reload */
+    else
+      *import_changed = 1;
   }
 
   if (!ipa_equal(new->next_hop_addr, old->next_hop_addr) ||
       (new->next_hop_self != old->next_hop_self) ||
       (new->next_hop_keep != old->next_hop_keep) ||
-      (new->missing_lladdr != old->missing_lladdr) ||
       (new->aigp != old->aigp) ||
       (new->aigp_originate != old->aigp_originate))
     *export_changed = 1;
@@ -2138,9 +2413,18 @@ bgp_channel_reconfigure(struct channel *C, struct channel_config *CC, int *impor
 }
 
 static void
-bgp_copy_config(struct proto_config *dest UNUSED, struct proto_config *src UNUSED)
+bgp_copy_config(struct proto_config *dest, struct proto_config *src)
 {
-  /* Just a shallow copy */
+  struct bgp_config *d = (void *) dest;
+  struct bgp_config *s = (void *) src;
+
+  /* Copy BFD options */
+  if (s->bfd)
+  {
+    struct bfd_options *opts = cfg_alloc(sizeof(struct bfd_options));
+    memcpy(opts, s->bfd, sizeof(struct bfd_options));
+    d->bfd = opts;
+  }
 }
 
 
@@ -2283,6 +2567,15 @@ bgp_show_afis(int code, char *s, u32 *afis, uint count)
   cli_msg(code, b.start);
 }
 
+const char *
+bgp_format_role_name(u8 role)
+{
+  static const char *bgp_role_names[] = { "provider", "rs_server", "rs_client", "customer", "peer" };
+  if (role == BGP_ROLE_UNDEFINED) return "undefined";
+  if (role < ARRAY_SIZE(bgp_role_names)) return bgp_role_names[role];
+  return "?";
+}
+
 static void
 bgp_show_capabilities(struct bgp_proto *p UNUSED, struct bgp_caps *caps)
 {
@@ -2408,6 +2701,12 @@ bgp_show_capabilities(struct bgp_proto *p UNUSED, struct bgp_caps *caps)
     bgp_show_afis(-1006, "        AF supported:", afl1, afn1);
     bgp_show_afis(-1006, "        AF preserved:", afl2, afn2);
   }
+
+  if (caps->hostname)
+    cli_msg(-1006, "      Hostname: %s", caps->hostname);
+
+  if (caps->role != BGP_ROLE_UNDEFINED)
+    cli_msg(-1006, "      Role: %s", bgp_format_role_name(caps->role));
 }
 
 static void
@@ -2421,6 +2720,9 @@ bgp_show_proto_info(struct proto *P)
     cli_msg(-1006, "    Neighbor range:   %N", p->cf->remote_range);
   else
     cli_msg(-1006, "    Neighbor address: %I%J", p->remote_ip, p->cf->iface);
+
+  if ((p->conn == &p->outgoing_conn) && (p->cf->remote_port != BGP_PORT))
+    cli_msg(-1006, "    Neighbor port:    %u", p->cf->remote_port);
 
   cli_msg(-1006, "    Neighbor AS:      %u", p->remote_as);
   cli_msg(-1006, "    Local AS:         %u", p->cf->local_as);
@@ -2464,8 +2766,12 @@ bgp_show_proto_info(struct proto *P)
 	    tm_remains(p->conn->hold_timer), p->conn->hold_time);
     cli_msg(-1006, "    Keepalive timer:  %t/%u",
 	    tm_remains(p->conn->keepalive_timer), p->conn->keepalive_time);
+    cli_msg(-1006, "    TX pending:       %d bytes%s",
+	    p->conn->sk->tpos - p->conn->sk->ttx,
+	    ev_active(p->conn->tx_ev) ? " (refill scheduled)" : "");
   }
 
+#if 0
   struct bgp_stats *s = &p->stats;
   cli_msg(-1006, "    FSM established transitions: %u",
 	  s->fsm_established_transitions);
@@ -2475,6 +2781,7 @@ bgp_show_proto_info(struct proto *P)
 	  s->tx_messages, s->tx_updates, s->tx_bytes);
   cli_msg(-1006, "    Last rcvd update elapsed time: %t s",
 	  p->last_rx_update ? (current_time() - p->last_rx_update) : 0);
+#endif
 
   if ((p->last_error_class != BE_NONE) &&
       (p->last_error_class != BE_MAN_DOWN))
@@ -2489,6 +2796,9 @@ bgp_show_proto_info(struct proto *P)
     WALK_LIST(c, p->p.channels)
     {
       channel_show_info(&c->c);
+
+      if (c->c.channel != &channel_bgp)
+	continue;
 
       if (p->gr_active_num)
 	cli_msg(-1006, "    Neighbor GR:    %s", bgp_gr_states[c->gr_active]);
@@ -2509,6 +2819,25 @@ bgp_show_proto_info(struct proto *P)
 
       if (c->igp_table_ip6)
 	cli_msg(-1006, "    IGP IPv6 table: %s", c->igp_table_ip6->name);
+
+      if (c->base_table)
+	cli_msg(-1006, "    Base table:     %s", c->base_table->name);
+
+      uint bucket_cnt = 0;
+      uint prefix_cnt = 0;
+      struct bgp_bucket *buck;
+      struct bgp_prefix *px;
+      if (c->ptx)
+	WALK_LIST(buck, c->ptx->bucket_queue)
+	{
+	  bucket_cnt++;
+	  WALK_LIST(px, buck->prefixes)
+	    if (px->cur)
+	      prefix_cnt++;
+	}
+
+      cli_msg(-1006, "    Pending %u attribute sets with total %u prefixes to send",
+	 bucket_cnt, prefix_cnt);
     }
   }
 }
@@ -2526,7 +2855,6 @@ struct channel_class channel_bgp = {
 struct protocol proto_bgp = {
   .name = 		"BGP",
   .template = 		"bgp%d",
-  .class =		PROTOCOL_BGP,
   .preference = 	DEF_PREF_BGP,
   .channel_mask =	NB_IP | NB_VPN | NB_FLOW,
   .proto_size =		sizeof(struct bgp_proto),
@@ -2538,7 +2866,15 @@ struct protocol proto_bgp = {
   .reconfigure = 	bgp_reconfigure,
   .copy_config = 	bgp_copy_config,
   .get_status = 	bgp_get_status,
-  .get_attr = 		bgp_get_attr,
-  .get_route_info = 	bgp_get_route_info,
   .show_proto_info = 	bgp_show_proto_info
 };
+
+void bgp_build(void)
+{
+  proto_build(&proto_bgp);
+  bgp_register_attrs();
+  bgp_listen_domain = DOMAIN_NEW(rtable);
+  LOCK_DOMAIN(rtable, bgp_listen_domain);
+  bgp_listen_pool = rp_new(proto_pool, bgp_listen_domain.rtable, "BGP Listen Sockets");
+  UNLOCK_DOMAIN(rtable, bgp_listen_domain);
+}

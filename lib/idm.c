@@ -14,14 +14,27 @@
 #include "lib/resource.h"
 #include "lib/string.h"
 
+#include <pthread.h>
+
+pthread_mutex_t* muidm = NULL;
+pthread_mutexattr_t attr4;
+
 
 void
 idm_init(struct idm *m, pool *p, uint size)
 {
+  if (!muidm)
+  {
+    pthread_mutexattr_init(&attr4);
+    pthread_mutexattr_settype(&attr4, PTHREAD_MUTEX_RECURSIVE);
+    muidm = malloc(sizeof(pthread_mutex_t));
+    pthread_mutex_init(muidm, &attr4);
+  }
   m->pos = 0;
   m->used = 1;
   m->size = size;
   m->data = mb_allocz(p, m->size * sizeof(u32));
+  m->pool = p;
 
   /* ID 0 is reserved */
   m->data[0] = 1;
@@ -32,7 +45,11 @@ static inline int u32_cto(uint x) { return ffs(~x) - 1; }
 u32
 idm_alloc(struct idm *m)
 {
+  //ASSERT_DIE(DG_IS_LOCKED(m->pool->domain));
+  pthread_mutex_lock(muidm);
   uint i, j;
+
+  //ASSERT_DIE(DG_IS_LOCKED(m->pool->domain));
 
   for (i = m->pos; i < m->size; i++)
     if (m->data[i] != 0xffffffff)
@@ -61,16 +78,21 @@ found:
 
   m->data[i] |= (1 << j);
   m->used++;
+  pthread_mutex_unlock(muidm);
   return 32 * i + j;
 }
 
 void
 idm_free(struct idm *m, u32 id)
 {
+  //ASSERT_DIE(DG_IS_LOCKED(m->pool->domain));
+  pthread_mutex_lock(muidm);
+
   uint i = id / 32;
   uint j = id % 32;
 
   ASSERT((i < m->size) && (m->data[i] & (1 << j)));
   m->data[i] &= ~(1 << j);
   m->used--;
+  pthread_mutex_unlock(muidm);
 }

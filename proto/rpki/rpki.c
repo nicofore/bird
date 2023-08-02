@@ -109,6 +109,7 @@ static void rpki_schedule_next_expire_check(struct rpki_cache *cache);
 static void rpki_stop_refresh_timer_event(struct rpki_cache *cache);
 static void rpki_stop_retry_timer_event(struct rpki_cache *cache);
 static void rpki_stop_expire_timer_event(struct rpki_cache *cache);
+static void rpki_stop_all_timers(struct rpki_cache *cache);
 
 
 /*
@@ -120,28 +121,46 @@ rpki_table_add_roa(struct rpki_cache *cache, struct channel *channel, const net_
 {
   struct rpki_proto *p = cache->p;
 
-  rta a0 = {
-    .src = p->p.main_source,
-    .source = RTS_RPKI,
-    .scope = SCOPE_UNIVERSE,
-    .dest = RTD_NONE,
-  };
+  ea_list *ea = NULL;
+  ea_set_attr_u32(&ea, &ea_gen_preference, 0, channel->preference);
+  ea_set_attr_u32(&ea, &ea_gen_source, 0, RTS_RPKI);
 
-  rta *a = rta_lookup(&a0);
-  rte *e = rte_get_temp(a);
+  rte e0 = { .attrs = ea, .src = p->p.main_source, };
 
-  e->pflags = 0;
-
-  rte_update2(channel, &pfxr->n, e, a0.src);
+  rte_update(channel, &pfxr->n, &e0, p->p.main_source);
 }
 
 void
 rpki_table_remove_roa(struct rpki_cache *cache, struct channel *channel, const net_addr_union *pfxr)
 {
   struct rpki_proto *p = cache->p;
-  rte_update2(channel, &pfxr->n, NULL, p->p.main_source);
+  rte_update(channel, &pfxr->n, NULL, p->p.main_source);
 }
 
+void
+rpki_start_refresh(struct rpki_proto *p)
+{
+  if (p->roa4_channel)
+    rt_refresh_begin(&p->roa4_channel->in_req);
+  if (p->roa6_channel)
+    rt_refresh_begin(&p->roa6_channel->in_req);
+
+  p->refresh_channels = 1;
+}
+
+void
+rpki_stop_refresh(struct rpki_proto *p)
+{
+  if (!p->refresh_channels)
+    return;
+
+  p->refresh_channels = 0;
+
+  if (p->roa4_channel)
+    rt_refresh_end(&p->roa4_channel->in_req);
+  if (p->roa6_channel)
+    rt_refresh_end(&p->roa6_channel->in_req);
+}
 
 /*
  *	RPKI Protocol Logic
@@ -198,6 +217,8 @@ rpki_force_restart_proto(struct rpki_proto *p)
 {
   if (p->cache)
   {
+    rpki_tr_close(p->cache->tr_sock);
+    rpki_stop_all_timers(p->cache);
     CACHE_DBG(p->cache, "Connection object destroying");
   }
 
@@ -278,12 +299,13 @@ rpki_cache_change_state(struct rpki_cache *cache, const enum rpki_cache_state ne
 
   case RPKI_CS_NO_INCR_UPDATE_AVAIL:
     /* Server was unable to answer the last Serial Query and sent Cache Reset. */
-    rpki_cache_change_state(cache, RPKI_CS_RESET);
-    break;
-
   case RPKI_CS_ERROR_NO_DATA_AVAIL:
     /* No validation records are available on the cache server. */
-    rpki_cache_change_state(cache, RPKI_CS_RESET);
+
+    if (old_state == RPKI_CS_ESTABLISHED)
+      rpki_cache_change_state(cache, RPKI_CS_RESET);
+    else
+      rpki_schedule_next_retry(cache);
     break;
 
   case RPKI_CS_ERROR_FATAL:
@@ -321,7 +343,7 @@ rpki_schedule_next_refresh(struct rpki_cache *cache)
   btime t = cache->refresh_interval S;
 
   CACHE_DBG(cache, "after %t s", t);
-  tm_start(cache->refresh_timer, t);
+  tm_start_in(cache->refresh_timer, t, cache->p->p.loop);
 }
 
 static void
@@ -330,7 +352,7 @@ rpki_schedule_next_retry(struct rpki_cache *cache)
   btime t = cache->retry_interval S;
 
   CACHE_DBG(cache, "after %t s", t);
-  tm_start(cache->retry_timer, t);
+  tm_start_in(cache->retry_timer, t, cache->p->p.loop);
 }
 
 static void
@@ -341,7 +363,7 @@ rpki_schedule_next_expire_check(struct rpki_cache *cache)
   t = MAX(t, 1 S);
 
   CACHE_DBG(cache, "after %t s", t);
-  tm_start(cache->expire_timer, t);
+  tm_start_in(cache->expire_timer, t, cache->p->p.loop);
 }
 
 static void
@@ -358,11 +380,19 @@ rpki_stop_retry_timer_event(struct rpki_cache *cache)
   tm_stop(cache->retry_timer);
 }
 
-static void UNUSED
+static void
 rpki_stop_expire_timer_event(struct rpki_cache *cache)
 {
   CACHE_DBG(cache, "Stop");
   tm_stop(cache->expire_timer);
+}
+
+static void
+rpki_stop_all_timers(struct rpki_cache *cache)
+{
+  rpki_stop_refresh_timer_event(cache);
+  rpki_stop_retry_timer_event(cache);
+  rpki_stop_expire_timer_event(cache);
 }
 
 static int
@@ -386,6 +416,9 @@ static void
 rpki_refresh_hook(timer *tm)
 {
   struct rpki_cache *cache = tm->data;
+
+  if (cache->p->cache != cache)
+    return;
 
   CACHE_DBG(cache, "%s", rpki_cache_state_to_str(cache->state));
 
@@ -433,6 +466,9 @@ rpki_retry_hook(timer *tm)
 {
   struct rpki_cache *cache = tm->data;
 
+  if (cache->p->cache != cache)
+    return;
+
   CACHE_DBG(cache, "%s", rpki_cache_state_to_str(cache->state));
 
   switch (cache->state)
@@ -451,6 +487,11 @@ rpki_retry_hook(timer *tm)
       CACHE_TRACE(D_EVENTS, cache, "Sync takes more time than retry interval %us, resetting connection.", cache->retry_interval);
       rpki_cache_change_state(cache, RPKI_CS_ERROR_TRANSPORT);
     }
+    break;
+
+  case RPKI_CS_NO_INCR_UPDATE_AVAIL:
+  case RPKI_CS_ERROR_NO_DATA_AVAIL:
+    rpki_cache_change_state(cache, RPKI_CS_RESET);
     break;
 
   default:
@@ -477,6 +518,9 @@ static void
 rpki_expire_hook(timer *tm)
 {
   struct rpki_cache *cache = tm->data;
+
+  if (cache->p->cache != cache)
+    return;
 
   if (!cache->last_update)
     return;
@@ -555,7 +599,7 @@ rpki_check_expire_interval(uint seconds)
 static struct rpki_cache *
 rpki_init_cache(struct rpki_proto *p, struct rpki_config *cf)
 {
-  pool *pool = rp_new(p->p.pool, cf->hostname);
+  pool *pool = rp_new(p->p.pool, proto_domain(&p->p), cf->hostname);
 
   struct rpki_cache *cache = mb_allocz(pool, sizeof(struct rpki_cache));
 
@@ -620,6 +664,7 @@ rpki_close_connection(struct rpki_cache *cache)
 {
   CACHE_TRACE(D_EVENTS, cache, "Closing a connection");
   rpki_tr_close(cache->tr_sock);
+  rpki_stop_refresh(cache->p);
   proto_notify_state(&cache->p->p, PS_START);
 }
 
@@ -639,18 +684,6 @@ rpki_shutdown(struct proto *P)
  * 	RPKI Reconfiguration
  */
 
-static int
-rpki_try_fast_reconnect(struct rpki_cache *cache)
-{
-  if (cache->state == RPKI_CS_ESTABLISHED)
-  {
-    rpki_cache_change_state(cache, RPKI_CS_FAST_RECONNECT);
-    return SUCCESSFUL_RECONF;
-  }
-
-  return NEED_RESTART;
-}
-
 /**
  * rpki_reconfigure_cache - a cache reconfiguration
  * @p: RPKI protocol instance
@@ -666,6 +699,7 @@ rpki_try_fast_reconnect(struct rpki_cache *cache)
 static int
 rpki_reconfigure_cache(struct rpki_proto *p UNUSED, struct rpki_cache *cache, struct rpki_config *new, struct rpki_config *old)
 {
+  u8 try_reset = 0;
   u8 try_fast_reconnect = 0;
 
   if (strcmp(old->hostname, new->hostname) != 0)
@@ -685,6 +719,13 @@ rpki_reconfigure_cache(struct rpki_proto *p UNUSED, struct rpki_cache *cache, st
     CACHE_TRACE(D_EVENTS, cache, "Transport type changed");
     return NEED_RESTART;
   }
+
+  if (old->ignore_max_length != new->ignore_max_length)
+  {
+    CACHE_TRACE(D_EVENTS, cache, "Ignore max length changed");
+    try_reset = 1;
+  }
+
 #if HAVE_LIBSSH
   else if (new->tr_config.type == RPKI_TR_SSH)
   {
@@ -713,8 +754,26 @@ rpki_reconfigure_cache(struct rpki_proto *p UNUSED, struct rpki_cache *cache, st
   TEST_INTERVAL(expire, Expire);
 #undef TEST_INTERVAL
 
-  if (try_fast_reconnect)
-    return rpki_try_fast_reconnect(cache);
+  if (try_reset || try_fast_reconnect)
+  {
+    if (cache->state != RPKI_CS_ESTABLISHED)
+      return NEED_RESTART;
+
+    if (try_reset && !try_fast_reconnect)
+      rpki_cache_change_state(cache, RPKI_CS_RESET);
+
+    if (try_fast_reconnect)
+    {
+      if (try_reset)
+      {
+	/* Force reset during reconnect */
+	cache->request_session_id = 1;
+	cache->serial_num = 0;
+      }
+
+      rpki_cache_change_state(cache, RPKI_CS_FAST_RECONNECT);
+    }
+  }
 
   return SUCCESSFUL_RECONF;
 }
@@ -814,16 +873,27 @@ rpki_show_proto_info(struct proto *P)
   if (cache)
   {
     const char *transport_name = "---";
+    uint default_port = 0;
 
     switch (cf->tr_config.type)
     {
 #if HAVE_LIBSSH
-    case RPKI_TR_SSH: transport_name = "SSHv2"; break;
+    case RPKI_TR_SSH:
+      transport_name = "SSHv2";
+      default_port = RPKI_SSH_PORT;
+      break;
 #endif
-    case RPKI_TR_TCP: transport_name = "Unprotected over TCP"; break;
+    case RPKI_TR_TCP:
+      transport_name = "Unprotected over TCP";
+      default_port = RPKI_TCP_PORT;
+      break;
     };
 
-    cli_msg(-1006, "  Cache server:     %s", rpki_get_cache_ident(cache));
+    cli_msg(-1006, "  Cache server:     %s", cf->hostname);
+
+    if (cf->port != default_port)
+      cli_msg(-1006, "  Cache port:       %u", cf->port);
+
     cli_msg(-1006, "  Status:           %s", rpki_cache_state_to_str(cache->state));
     cli_msg(-1006, "  Transport:        %s", transport_name);
     cli_msg(-1006, "  Protocol version: %u", cache->version);
@@ -909,7 +979,7 @@ rpki_postconfig(struct proto_config *CF)
 {
   /* Define default channel */
   if (EMPTY_LIST(CF->channels))
-    channel_config_new(NULL, net_label[CF->net_type], CF->net_type, CF);
+    cf_error("Channel not specified");
 }
 
 static void
@@ -921,7 +991,6 @@ rpki_copy_config(struct proto_config *dest UNUSED, struct proto_config *src UNUS
 struct protocol proto_rpki = {
   .name = 		"RPKI",
   .template = 		"rpki%d",
-  .class =		PROTOCOL_RPKI,
   .preference = 	DEF_PREF_RPKI,
   .proto_size = 	sizeof(struct rpki_proto),
   .config_size =	sizeof(struct rpki_config),
@@ -935,3 +1004,9 @@ struct protocol proto_rpki = {
   .reconfigure = 	rpki_reconfigure,
   .get_status = 	rpki_get_status,
 };
+
+void
+rpki_build(void)
+{
+  proto_build(&proto_rpki);
+}

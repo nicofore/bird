@@ -32,6 +32,7 @@ m4_divert(-1)m4_dnl
 #
 #	101	content of per-inst struct
 #	102	constructor arguments
+#	110	constructor attributes
 #	103	constructor body
 #	104	dump line item content
 #		(there may be nothing in dump-line content and
@@ -40,16 +41,19 @@ m4_divert(-1)m4_dnl
 #	106	comparator body
 #	107	struct f_line_item content
 #	108	interpreter body
+#	109	iterator body
 #
 #	Here are macros to allow you to _divert to the right directions.
 m4_define(FID_STRUCT_IN, `m4_divert(101)')
 m4_define(FID_NEW_ARGS, `m4_divert(102)')
+m4_define(FID_NEW_ATTRIBUTES, `m4_divert(110)')
 m4_define(FID_NEW_BODY, `m4_divert(103)')
 m4_define(FID_DUMP_BODY, `m4_divert(104)m4_define([[FID_DUMP_BODY_EXISTS]])')
 m4_define(FID_LINEARIZE_BODY, `m4_divert(105)')
 m4_define(FID_SAME_BODY, `m4_divert(106)')
 m4_define(FID_LINE_IN, `m4_divert(107)')
 m4_define(FID_INTERPRET_BODY, `m4_divert(108)')
+m4_define(FID_ITERATE_BODY, `m4_divert(109)')
 
 #	Sometimes you want slightly different code versions in different
 #	outputs.
@@ -90,7 +94,7 @@ FID_DUMP_BODY()m4_dnl
 debug("%s" $4 "\n", INDENT, $5);
 ]])
 FID_INTERPRET_EXEC()m4_dnl
-const $1 $2 = whati->$2
+$1 $2 = whati->$2
 FID_INTERPRET_BODY')
 
 #	Instruction arguments are needed only until linearization is done.
@@ -104,15 +108,18 @@ FID_STRUCT_IN()m4_dnl
       struct f_inst * f$1;
 FID_NEW_ARGS()m4_dnl
   , struct f_inst * f$1
+FID_NEW_ATTRIBUTES()m4_dnl
+NONNULL(m4_eval($1+1))
 FID_NEW_BODY()m4_dnl
 whati->f$1 = f$1;
-for (const struct f_inst *child = f$1; child; child = child->next) {
-  what->size += child->size;
+const struct f_inst *child$1 = f$1;
+do {
+  what->size += child$1->size;
 FID_IFCONST([[
-  if (child->fi_code != FI_CONSTANT)
+  if (child$1->fi_code != FI_CONSTANT)
     constargs = 0;
 ]])
-}
+} while (child$1 = child$1->next);
 FID_LINEARIZE_BODY
 pos = linearize(dest, whati->f$1, pos);
 FID_INTERPRET_BODY()')
@@ -184,10 +191,17 @@ if (f$1->type && f$2->type && (f$1->type != f$2->type) &&
   cf_error("Arguments $1 and $2 of %s must be of the same type", f_instruction_name(what->fi_code));
 FID_INTERPRET_BODY()')
 
+m4_define(ARG_PREFER_SAME_TYPE, `
+FID_NEW_BODY()m4_dnl
+if (f$1->type && f$2->type && (f$1->type != f$2->type))
+   (void) (f_const_promotion(f$2, f$1->type) || f_const_promotion(f$1, f$2->type));
+FID_INTERPRET_BODY()')
+
 #	Executing another filter line. This replaces the recursion
 #	that was needed in the former implementation.
 m4_define(LINEX, `FID_INTERPRET_EXEC()LINEX_($1)FID_INTERPRET_NEW()return $1 FID_INTERPRET_BODY()')
 m4_define(LINEX_, `do {
+  if (fstk->ecnt + 1 >= fstk->elen) runtime("Filter execution stack overflow");
   fstk->estk[fstk->ecnt].pos = 0;
   fstk->estk[fstk->ecnt].line = $1;
   fstk->estk[fstk->ecnt].ventry = fstk->vcnt;
@@ -208,9 +222,11 @@ whati->f$1 = f$1;
 FID_DUMP_BODY()m4_dnl
 f_dump_line(item->fl$1, indent + 1);
 FID_LINEARIZE_BODY()m4_dnl
-item->fl$1 = f_linearize(whati->f$1);
+item->fl$1 = f_linearize(whati->f$1, $2);
 FID_SAME_BODY()m4_dnl
 if (!f_same(f1->fl$1, f2->fl$1)) return 0;
+FID_ITERATE_BODY()m4_dnl
+if (whati->fl$1) BUFFER_PUSH(fit->lines) = whati->fl$1;
 FID_INTERPRET_EXEC()m4_dnl
 do { if (whati->fl$1) {
   LINEX_(whati->fl$1);
@@ -223,7 +239,7 @@ FID_INTERPRET_BODY()')
 #	state the result and put it to the right place.
 m4_define(RESULT, `RESULT_TYPE([[$1]]) RESULT_([[$1]],[[$2]],[[$3]])')
 m4_define(RESULT_, `RESULT_VAL([[ (struct f_val) { .type = $1, .val.$2 = $3 } ]])')
-m4_define(RESULT_VAL, `FID_HIC(, [[do { res = $1; fstk->vcnt++; } while (0)]],
+m4_define(RESULT_VAL, `FID_HIC(, [[do { res = $1; f_vcnt_check_overflow(1); fstk->vcnt++; } while (0)]],
 [[return fi_constant(what, $1)]])')
 m4_define(RESULT_VOID, `RESULT_VAL([[ (struct f_val) { .type = T_VOID } ]])')
 
@@ -234,8 +250,12 @@ m4_define(ERROR,
 #	This macro specifies result type and makes there are no conflicting definitions
 m4_define(RESULT_TYPE,
 	`m4_ifdef([[INST_RESULT_TYPE]],
-		  [[m4_ifelse(INST_RESULT_TYPE,$1,,[[ERROR([[Multiple type definitons]])]])]],
+		  [[m4_ifelse(INST_RESULT_TYPE,$1,,[[ERROR([[Multiple type definitions in]] INST_NAME)]])]],
 		  [[m4_define(INST_RESULT_TYPE,$1) RESULT_TYPE_($1)]])')
+
+m4_define(RESULT_TYPE_CHECK,
+	`m4_ifelse(INST_OUTVAL,0,,
+		   [[m4_ifdef([[INST_RESULT_TYPE]],,[[ERROR([[Missing type definition in]] INST_NAME)]])]])')
 
 m4_define(RESULT_TYPE_, `
 FID_NEW_BODY()m4_dnl
@@ -246,7 +266,7 @@ FID_INTERPRET_BODY()')
 m4_define(SYMBOL, `FID_MEMBER(struct symbol *, sym, [[strcmp(f1->sym->name, f2->sym->name) || (f1->sym->class != f2->sym->class)]], "symbol %s", item->sym->name)')
 m4_define(RTC, `FID_MEMBER(struct rtable_config *, rtc, [[strcmp(f1->rtc->name, f2->rtc->name)]], "route table %s", item->rtc->name)')
 m4_define(STATIC_ATTR, `FID_MEMBER(struct f_static_attr, sa, f1->sa.sa_code != f2->sa.sa_code,,)')
-m4_define(DYNAMIC_ATTR, `FID_MEMBER(struct f_dynamic_attr, da, f1->da.ea_code != f2->da.ea_code,,)')
+m4_define(DYNAMIC_ATTR, `FID_MEMBER(const struct ea_class *, da, f1->da != f2->da,,)')
 m4_define(ACCESS_RTE, `FID_HIC(,[[do { if (!fs->rte) runtime("No route to access"); } while (0)]],NEVER_CONSTANT())')
 
 #	2) Code wrapping
@@ -265,6 +285,7 @@ m4_define(ACCESS_RTE, `FID_HIC(,[[do { if (!fs->rte) runtime("No route to access
 #	7	dump line item callers
 #	8	linearize
 #	9	same (filter comparator)
+#	10	iterate
 #	1	union in struct f_inst
 #	3	constructors + interpreter
 #
@@ -285,9 +306,11 @@ m4_define(FID_DUMP, `FID_ZONE(6, Dump line)')
 m4_define(FID_DUMP_CALLER, `FID_ZONE(7, Dump line caller)')
 m4_define(FID_LINEARIZE, `FID_ZONE(8, Linearize)')
 m4_define(FID_SAME, `FID_ZONE(9, Comparison)')
+m4_define(FID_ITERATE, `FID_ZONE(10, Iteration)')
 
 #	This macro does all the code wrapping. See inline comments.
 m4_define(INST_FLUSH, `m4_ifdef([[INST_NAME]], [[
+RESULT_TYPE_CHECK()m4_dnl		 Check for defined RESULT_TYPE()
 FID_ENUM()m4_dnl			 Contents of enum fi_code { ... }
   INST_NAME(),
 FID_ENUM_STR()m4_dnl			 Contents of const char * indexed by enum fi_code
@@ -303,7 +326,9 @@ m4_undivert(107)m4_dnl
 FID_NEW()m4_dnl				 Constructor and interpreter code together
 FID_HIC(
 [[m4_dnl				 Public declaration of constructor in H file
-struct f_inst *f_new_inst_]]INST_NAME()[[(enum f_instruction_code fi_code
+struct f_inst *
+m4_undivert(110)m4_dnl
+f_new_inst_]]INST_NAME()[[(enum f_instruction_code fi_code
 m4_undivert(102)m4_dnl
 );]],
 [[m4_dnl				 The one case in The Big Switch inside interpreter
@@ -315,7 +340,9 @@ m4_undivert(102)m4_dnl
   break;
 ]],
 [[m4_dnl				 Constructor itself
-struct f_inst *f_new_inst_]]INST_NAME()[[(enum f_instruction_code fi_code
+struct f_inst *
+m4_undivert(110)m4_dnl
+f_new_inst_]]INST_NAME()[[(enum f_instruction_code fi_code
 m4_undivert(102)m4_dnl
 )
   {
@@ -359,6 +386,7 @@ case INST_NAME(): {
 #undef whati
 #undef item
   dest->items[pos].fi_code = what->fi_code;
+  dest->items[pos].flags = what->flags;
   dest->items[pos].lineno = what->lineno;
   break;
 }
@@ -372,6 +400,13 @@ m4_undivert(106)m4_dnl
 #undef f2
 break;
 
+FID_ITERATE()m4_dnl			The iterator
+case INST_NAME():
+#define whati (&(what->i_]]INST_NAME()[[))
+m4_undivert(109)m4_dnl
+#undef whati
+break;
+
 m4_divert(-1)FID_FLUSH(101,200)m4_dnl  And finally this flushes all the unused diversions
 ]])')
 
@@ -379,6 +414,7 @@ m4_define(INST, `m4_dnl				This macro is called on beginning of each instruction
 INST_FLUSH()m4_dnl				First, old data is flushed
 m4_define([[INST_NAME]], [[$1]])m4_dnl		Then we store instruction name,
 m4_define([[INST_INVAL]], [[$2]])m4_dnl		instruction input value count,
+m4_define([[INST_OUTVAL]], [[$3]])m4_dnl	instruction output value count,
 m4_undefine([[INST_NEVER_CONSTANT]])m4_dnl	reset NEVER_CONSTANT trigger,
 m4_undefine([[INST_RESULT_TYPE]])m4_dnl		and reset RESULT_TYPE value.
 FID_INTERPRET_BODY()m4_dnl 			By default, every code is interpreter code.
@@ -451,7 +487,7 @@ f_instruction_name_(enum f_instruction_code fi)
 static inline struct f_inst *
 fi_new(enum f_instruction_code fi_code)
 {
-  struct f_inst *what = cfg_allocz(sizeof(struct f_inst));
+  struct f_inst *what = tmp_allocz(sizeof(struct f_inst));
   what->lineno = ifs->lino;
   what->size = 1;
   what->fi_code = fi_code;
@@ -467,7 +503,7 @@ fi_constant(struct f_inst *what, struct f_val val)
 }
 
 static int
-f_const_promotion(struct f_inst *arg, enum f_type want)
+f_const_promotion(struct f_inst *arg, btype want)
 {
   if (arg->fi_code != FI_CONSTANT)
     return 0;
@@ -479,6 +515,11 @@ f_const_promotion(struct f_inst *arg, enum f_type want)
       .type = T_QUAD,
       .val.i = ipa_to_u32(c->val.ip),
     };
+    return 1;
+  }
+
+  else if ((c->type == T_SET) && (!c->val.t) && (want == T_PREFIX_SET)) {
+    *c = f_const_empty_prefix_set;
     return 1;
   }
 
@@ -537,7 +578,7 @@ FID_WR_PUT(8)
 }
 
 struct f_line *
-f_linearize_concat(const struct f_inst * const inst[], uint count)
+f_linearize_concat(const struct f_inst * const inst[], uint count, uint results)
 {
   uint len = 0;
   for (uint i=0; i<count; i++)
@@ -548,6 +589,8 @@ f_linearize_concat(const struct f_inst * const inst[], uint count)
 
   for (uint i=0; i<count; i++)
     out->len = linearize(out, inst[i], out->len);
+
+  out->results = results;
 
 #ifdef LOCAL_DEBUG
   f_dump_line(out, 0);
@@ -582,6 +625,27 @@ FID_WR_PUT(9)
   return 1;
 }
 
+
+/* Part of FI_SWITCH filter iterator */
+static void
+f_add_tree_lines(const struct f_tree *t, void *fit_)
+{
+  struct filter_iterator * fit = fit_;
+
+  if (t->data)
+    BUFFER_PUSH(fit->lines) = t->data;
+}
+
+/* Filter line iterator */
+void
+f_add_lines(const struct f_line_item *what, struct filter_iterator *fit)
+{
+  switch(what->fi_code) {
+FID_WR_PUT(10)
+  }
+}
+
+
 #if defined(__GNUC__) && __GNUC__ >= 6
 #pragma GCC diagnostic pop
 #endif
@@ -596,7 +660,8 @@ FID_WR_PUT(4)m4_dnl
 struct f_inst {
   struct f_inst *next;			/* Next instruction */
   enum f_instruction_code fi_code;	/* Instruction code */
-  enum f_type type;			/* Type of returned value, if known */
+  enum f_instruction_flags flags;	/* Flags, instruction-specific */
+  btype type;				/* Type of returned value, if known */
   int size;				/* How many instructions are underneath */
   int lineno;				/* Line number */
   union {

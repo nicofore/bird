@@ -23,7 +23,8 @@ CF_DECLS
 
 CF_KEYWORDS(BFD, MIN, IDLE, RX, TX, INTERVAL, MULTIPLIER, PASSIVE,
 	INTERFACE, MULTIHOP, NEIGHBOR, DEV, LOCAL, AUTHENTICATION,
-	NONE, SIMPLE, METICULOUS, KEYED, MD5, SHA1, IPV4, IPV6, DIRECT)
+	NONE, SIMPLE, METICULOUS, KEYED, MD5, SHA1, IPV4, IPV6, DIRECT,
+	STRICT, BIND)
 
 %type <iface> bfd_neigh_iface
 %type <a> bfd_neigh_local
@@ -36,6 +37,8 @@ proto: bfd_proto ;
 bfd_proto_start: proto_start BFD
 {
   this_proto = proto_config_new(&proto_bfd, $1);
+  this_proto->loop_order = DOMAIN_ORDER(proto);
+  this_proto->loop_max_latency = 10 MS_;
   init_list(&BFD_CFG->patt_list);
   init_list(&BFD_CFG->neigh_list);
   BFD_CFG->accept_ipv4 = BFD_CFG->accept_ipv6 = 1;
@@ -48,6 +51,7 @@ bfd_proto_item:
  | INTERFACE bfd_iface
  | MULTIHOP bfd_multihop
  | NEIGHBOR bfd_neighbor
+ | STRICT BIND bool { BFD_CFG->strict_bind = $3; }
  ;
 
 bfd_proto_opts:

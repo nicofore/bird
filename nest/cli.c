@@ -262,7 +262,7 @@ cli_command(struct cli *c)
     log(L_TRACE "CLI: %s", c->rx_buf);
   bzero(&f, sizeof(f));
   f.mem = c->parser_pool;
-  f.pool = rp_new(c->pool, "Config");
+  f.pool = rp_new(c->pool, the_bird_domain.the_bird, "Config");
   init_list(&f.symbols);
   cf_read_hook = cli_cmd_read_hook;
   cli_rh_pos = c->rx_buf;
@@ -302,24 +302,24 @@ cli_event(void *data)
 	cli_command(c);
     }
 
-  cli_write_trigger(c);
+  if (c->tx_pos)
+    cli_write_trigger(c);
 }
 
 cli *
-cli_new(void *priv)
+cli_new(struct birdsock *sock)
 {
-  pool *p = rp_new(cli_pool, "CLI");
+  pool *p = rp_new(cli_pool, the_bird_domain.the_bird, "CLI");
   cli *c = mb_alloc(p, sizeof(cli));
 
   bzero(c, sizeof(cli));
   c->pool = p;
-  c->priv = priv;
+  c->sock = sock;
   c->event = ev_new(p);
   c->event->hook = cli_event;
   c->event->data = c;
   c->cont = cli_hello;
   c->parser_pool = lp_new_default(c->pool);
-  c->show_pool = lp_new_default(c->pool);
   c->rx_buf = mb_alloc(c->pool, CLI_RX_BUF_SIZE);
   ev_schedule(c->event);
   return c;
@@ -409,11 +409,19 @@ void
 cli_free(cli *c)
 {
   cli_set_log_echo(c, 0, 0);
+  int defer = 0;
   if (c->cleanup)
-    c->cleanup(c);
+    defer = c->cleanup(c);
   if (c == cmd_reconfig_stored_cli)
     cmd_reconfig_stored_cli = NULL;
-  rfree(c->pool);
+
+  if (defer)
+  {
+    sk_close(c->sock);
+    c->sock = NULL;
+  }
+  else
+    rp_free(c->pool);
 }
 
 /**
@@ -425,7 +433,7 @@ cli_free(cli *c)
 void
 cli_init(void)
 {
-  cli_pool = rp_new(&root_pool, "CLI");
+  cli_pool = rp_new(&root_pool, the_bird_domain.the_bird, "CLI");
   init_list(&cli_log_hooks);
   cli_log_inited = 1;
 }

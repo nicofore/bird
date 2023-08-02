@@ -9,16 +9,39 @@
 #ifndef _BIRD_BIRDLIB_H_
 #define _BIRD_BIRDLIB_H_
 
+#include <stddef.h>
+
+#include "sysdep/config.h"
 #include "lib/alloca.h"
 
 /* Ugly structure offset handling macros */
 
-struct align_probe { char x; long int y; };
+#define SAME_TYPE(a, b)	({ int _ = ((a) != (b)); !_; })
+#define TYPE_CAST(from, to, what) ( SAME_TYPE(((from) NULL), (what)), ((to) (what)))
 
+#ifdef offsetof
+#define OFFSETOF offsetof
+#else
 #define OFFSETOF(s, i) ((size_t) &((s *)0)->i)
-#define SKIP_BACK(s, i, p) ((s *)((char *)p - OFFSETOF(s, i)))
+#endif
+
+#define SKIP_BACK(s, i, p) ({ s *_ptr = ((s *)((char *)p - OFFSETOF(s, i))); SAME_TYPE(&_ptr->i, p); _ptr; })
 #define BIRD_ALIGN(s, a) (((s)+a-1)&~(a-1))
-#define CPU_STRUCT_ALIGN (sizeof(struct align_probe))
+#define CPU_STRUCT_ALIGN  (MAX_(_Alignof(void*), _Alignof(u64)))
+#define BIRD_CPU_ALIGN(s) BIRD_ALIGN((s), CPU_STRUCT_ALIGN)
+
+/* Structure item alignment macros */
+
+#define PADDING_NAME(id)	_padding_##id
+#define PADDING_(id, sz)	u8 PADDING_NAME(id)[sz]
+
+#if CPU_POINTER_ALIGNMENT == 4
+#define PADDING(id, n32, n64)	PADDING_(id, n32)
+#elif CPU_POINTER_ALIGNMENT == 8
+#define PADDING(id, n32, n64)	PADDING_(id, n64)
+#else
+#error "Strange CPU pointer alignment: " CPU_POINTER_ALIGNMENT
+#endif
 
 /* Utility macros */
 
@@ -31,6 +54,9 @@ struct align_probe { char x; long int y; };
 #define MIN(a,b) MIN_(a,b)
 #define MAX(a,b) MAX_(a,b)
 #endif
+
+#define ROUND_DOWN_POW2(a,b)  ((a) & ~((b)-1))
+#define ROUND_UP_POW2(a,b)  (((a)+((b)-1)) & ~((b)-1))
 
 #define U64(c) UINT64_C(c)
 #define ABS(a)   ((a)>=0 ? (a) : -(a))
@@ -70,13 +96,13 @@ static inline int u64_cmp(u64 i1, u64 i2)
 /* Macros for gcc attributes */
 
 #define NORET __attribute__((noreturn))
+#define USE_RESULT __atribute__((warn_unused_result))
 #define UNUSED __attribute__((unused))
 #define PACKED __attribute__((packed))
 #define NONNULL(...) __attribute__((nonnull((__VA_ARGS__))))
 
-#ifndef HAVE_THREAD_LOCAL
-#define _Thread_local
-#endif
+#define STATIC_ASSERT(EXP) _Static_assert(EXP, #EXP)
+#define STATIC_ASSERT_MSG(EXP,MSG) _Static_assert(EXP, MSG)
 
 /* Microsecond time */
 
@@ -89,6 +115,7 @@ typedef s64 btime;
 #define TO_S	/1000000
 #define TO_MS	/1000
 #define TO_US	/1
+#define TO_NS	* (btime) 1000
 
 #ifndef PARSER
 #define S	S_
@@ -154,13 +181,25 @@ void bug(const char *msg, ...) NORET;
 #define L_BUG "\011"			/* BIRD bugs */
 
 void debug(const char *msg, ...);	/* Printf to debug output */
+void debug_safe(const char *msg);	/* Printf to debug output, async-safe */
+
+/* Internal thread ID, useful for logging */
+extern _Atomic uint max_thread_id;
+extern _Thread_local uint this_thread_id;
+#define THIS_THREAD_ID  (this_thread_id ?: (this_thread_id = atomic_fetch_add_explicit(&max_thread_id, 1, memory_order_acq_rel)))
+
 
 /* Debugging */
 
 #if defined(LOCAL_DEBUG) || defined(GLOBAL_DEBUG)
 #define DBG(x, y...) debug(x, ##y)
+#define DBGL(x, y...) debug(x "\n", ##y)
+#elif defined(DEBUG_TO_LOG)
+#define DBG(...) do { } while (0)
+#define DBGL(...) log(L_DEBUG __VA_ARGS__)
 #else
-#define DBG(x, y...) do { } while(0)
+#define DBG(...) do { } while(0)
+#define DBGL(...) do { } while (0)
 #endif
 
 #define ASSERT_DIE(x) do { if (!(x)) bug("Assertion '%s' failed at %s:%d", #x, __FILE__, __LINE__); } while(0)
@@ -192,5 +231,7 @@ asm(
 /* Pseudorandom numbers */
 
 u32 random_u32(void);
+void random_init(void);
+void random_bytes(void *buf, size_t size);
 
 #endif

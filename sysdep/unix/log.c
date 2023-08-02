@@ -15,6 +15,7 @@
  * user's manual.
  */
 
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdarg.h>
@@ -31,12 +32,13 @@
 #include "lib/lists.h"
 #include "sysdep/unix/unix.h"
 
+static int dbg_fd = -1;
 static FILE *dbgf;
 static list *current_log_list;
 static char *current_syslog_name; /* NULL -> syslog closed */
 
-
-#ifdef USE_PTHREADS
+_Atomic uint max_thread_id = ATOMIC_VAR_INIT(1);
+_Thread_local uint this_thread_id;
 
 #include <pthread.h>
 
@@ -47,15 +49,6 @@ static inline void log_unlock(void) { pthread_mutex_unlock(&log_mutex); }
 static pthread_t main_thread;
 void main_thread_init(void) { main_thread = pthread_self(); }
 static int main_thread_self(void) { return pthread_equal(pthread_self(), main_thread); }
-
-#else
-
-static inline void log_lock(void) {  }
-static inline void log_unlock(void) {  }
-void main_thread_init(void) { }
-static int main_thread_self(void) { return 1; }
-
-#endif
 
 
 #ifdef HAVE_SYSLOG_H
@@ -189,7 +182,7 @@ log_commit(int class, buffer *buf)
 		l->pos += msg_len;
 	      }
 
-	      fprintf(l->fh, "%s <%s> ", tbuf, class_names[class]);
+	      fprintf(l->fh, "%s [%04x] <%s> ", tbuf, THIS_THREAD_ID, class_names[class]);
 	    }
 	  fputs(buf->start, l->fh);
 	  fputc('\n', l->fh);
@@ -299,6 +292,8 @@ die(const char *msg, ...)
   exit(1);
 }
 
+static struct timespec dbg_time_start;
+
 /**
  * debug - write to debug output
  * @msg: a printf-like message
@@ -309,26 +304,56 @@ die(const char *msg, ...)
 void
 debug(const char *msg, ...)
 {
-#define MAX_DEBUG_BUFSIZE       65536
+#define MAX_DEBUG_BUFSIZE 16384
   va_list args;
-  static uint bufsize = 4096;
-  static char *buf = NULL;
-
-  if (!buf)
-    buf = mb_alloc(&root_pool, bufsize);
+  char buf[MAX_DEBUG_BUFSIZE], *pos = buf;
+  int max = MAX_DEBUG_BUFSIZE;
 
   va_start(args, msg);
   if (dbgf)
     {
-      while (bvsnprintf(buf, bufsize, msg, args) < 0)
-        if (bufsize >= MAX_DEBUG_BUFSIZE)
-          bug("Extremely long debug output, split it.");
-        else
-          buf = mb_realloc(buf, (bufsize *= 2));
+#if 0
+      struct timespec dbg_time;
+      clock_gettime(CLOCK_MONOTONIC, &dbg_time);
+      uint nsec;
+      uint sec;
+
+      if (dbg_time.tv_nsec > dbg_time_start.tv_nsec)
+      {
+	nsec = dbg_time.tv_nsec - dbg_time_start.tv_nsec;
+	sec = dbg_time.tv_sec - dbg_time_start.tv_sec;
+      }
+      else
+      {
+	nsec = 1000000000 + dbg_time.tv_nsec - dbg_time_start.tv_nsec;
+	sec = dbg_time.tv_sec - dbg_time_start.tv_sec - 1;
+      }
+
+      int n = bsnprintf(pos, max, "%u.%09u: [%04x] ", sec, nsec, THIS_THREAD_ID);
+      pos += n;
+      max -= n;
+#endif
+      if (bvsnprintf(pos, max, msg, args) < 0)
+	bug("Extremely long debug output, split it.");
 
       fputs(buf, dbgf);
     }
   va_end(args);
+}
+
+/**
+ * debug_safe - async-safe write to debug output
+ * @msg: a string message
+ *
+ * This function prints the message @msg to the debugging output in a
+ * way that is async safe and can be used in signal handlers. No newline
+ * character is appended.
+ */
+void
+debug_safe(const char *msg)
+{
+  if (dbg_fd >= 0)
+    write(dbg_fd, msg, strlen(msg));
 }
 
 static list *
@@ -341,7 +366,11 @@ default_log_list(int initial, const char **syslog_name)
 #ifdef HAVE_SYSLOG_H
   if (!dbgf)
     {
-      static struct log_config lc_syslog = { .mask = ~0 };
+      static struct log_config lc_syslog;
+      lc_syslog = (struct log_config){
+	.mask = ~0
+      };
+
       add_tail(&log_list, &lc_syslog.n);
       *syslog_name = bird_name;
     }
@@ -349,15 +378,24 @@ default_log_list(int initial, const char **syslog_name)
 
   if (dbgf && (dbgf != stderr))
     {
-      static struct log_config lc_debug = { .mask = ~0 };
-      lc_debug.fh = dbgf;
+      static struct log_config lc_debug;
+      lc_debug = (struct log_config){
+	.mask = ~0,
+	.fh = dbgf
+      };
+
       add_tail(&log_list, &lc_debug.n);
     }
 
   if (initial || (dbgf == stderr))
     {
-      static struct log_config lc_stderr = { .mask = ~0, .terminal_flag = 1};
-      lc_stderr.fh = stderr;
+      static struct log_config lc_stderr;
+      lc_stderr = (struct log_config){
+	.mask = ~0,
+	.terminal_flag = 1,
+	.fh = stderr
+      };
+
       add_tail(&log_list, &lc_stderr.n);
     }
 
@@ -369,11 +407,11 @@ log_switch(int initial, list *logs, const char *new_syslog_name)
 {
   struct log_config *l;
 
+  /* We should not manipulate with log list when other threads may use it */
+  log_lock();
+
   if (!logs || EMPTY_LIST(*logs))
     logs = default_log_list(initial, &new_syslog_name);
-
-  /* We shouldn't close the logs when other threads may use them */
-  log_lock();
 
   /* Close the logs to avoid pinning them on disk when deleted */
   if (current_log_list)
@@ -416,8 +454,12 @@ done:
 void
 log_init_debug(char *f)
 {
+  clock_gettime(CLOCK_MONOTONIC, &dbg_time_start);
+
+  dbg_fd = -1;
   if (dbgf && dbgf != stderr)
     fclose(dbgf);
+
   if (!f)
     dbgf = NULL;
   else if (!*f)
@@ -428,6 +470,10 @@ log_init_debug(char *f)
     fprintf(stderr, "bird: Unable to open debug file %s: %s\n", f, strerror(errno));
     exit(1);
   }
+
   if (dbgf)
+  {
     setvbuf(dbgf, NULL, _IONBF, 0);
+    dbg_fd = fileno(dbgf);
+  }
 }

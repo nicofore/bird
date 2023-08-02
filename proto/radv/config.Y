@@ -33,7 +33,7 @@ CF_KEYWORDS(RADV, PREFIX, INTERFACE, MIN, MAX, RA, DELAY, INTERVAL, SOLICITED,
 	RETRANS, TIMER, CURRENT, HOP, LIMIT, DEFAULT, VALID, PREFERRED, MULT,
 	LIFETIME, SKIP, ONLINK, AUTONOMOUS, RDNSS, DNSSL, NS, DOMAIN, LOCAL,
 	TRIGGER, SENSITIVE, PREFERENCE, LOW, MEDIUM, HIGH, PROPAGATE, ROUTE,
-	ROUTES, RA_PREFERENCE, RA_LIFETIME)
+	ROUTES)
 
 CF_ENUM(T_ENUM_RA_PREFERENCE, RA_PREF_, LOW, MEDIUM, HIGH)
 
@@ -46,6 +46,7 @@ proto: radv_proto ;
 radv_proto_start: proto_start RADV
 {
   this_proto = proto_config_new(&proto_radv, $1);
+  this_proto->net_type = NET_IP6;
 
   init_list(&RADV_CFG->patt_list);
   init_list(&RADV_CFG->pref_list);
@@ -334,9 +335,6 @@ radv_sensitive:
    /* empty */ { $$ = (uint) -1; }
  | SENSITIVE bool { $$ = $2; }
  ;
-
-dynamic_attr: RA_PREFERENCE { $$ = f_new_dynamic_attr(EAF_TYPE_INT, T_ENUM_RA_PREFERENCE, EA_RA_PREFERENCE); } ;
-dynamic_attr: RA_LIFETIME { $$ = f_new_dynamic_attr(EAF_TYPE_INT, T_INT, EA_RA_LIFETIME); } ;
 
 CF_CODE
 

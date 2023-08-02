@@ -85,7 +85,7 @@ ospf_proto_finish(void)
   struct ospf_iface_patt *ic;
 
   /* Define default channel */
-  if (EMPTY_LIST(this_proto->channels))
+  if (! proto_cf_main_channel(this_proto))
   {
     uint net_type = this_proto->net_type = ospf_cfg_is_v2() ? NET_IP4 : NET_IP6;
     channel_config_new(NULL, net_label[net_type], net_type, this_proto);
@@ -190,7 +190,7 @@ ospf_check_auth(void)
 
 CF_DECLS
 
-CF_KEYWORDS(OSPF, V2, V3, OSPF_METRIC1, OSPF_METRIC2, OSPF_TAG, OSPF_ROUTER_ID)
+CF_KEYWORDS(OSPF, V2, V3)
 CF_KEYWORDS(AREA, NEIGHBORS, RFC1583COMPAT, STUB, TICK, COST, COST2, RETRANSMIT)
 CF_KEYWORDS(HELLO, TRANSMIT, PRIORITY, DEAD, TYPE, BROADCAST, BCAST, DEFAULT)
 CF_KEYWORDS(NONBROADCAST, NBMA, POINTOPOINT, PTP, POINTOMULTIPOINT, PTMP)
@@ -248,8 +248,7 @@ ospf_channel_start: net_type ospf_af_mc
   $$ = this_channel = channel_config_get(NULL, net_label[$1], $1, this_proto);
 
   /* Save the multicast flag */
-  if (this_channel == proto_cf_main_channel(this_proto))
-    OSPF_CFG->af_mc = $2;
+  OSPF_CFG->af_mc = $2;
 };
 
 ospf_channel: ospf_channel_start channel_opt_list channel_end;
@@ -505,11 +504,6 @@ ospf_iface_opt_list:
 ospf_iface:
   ospf_iface_start ospf_iface_patt_list ospf_iface_opt_list { ospf_iface_finish(); }
  ;
-
-dynamic_attr: OSPF_METRIC1 { $$ = f_new_dynamic_attr(EAF_TYPE_INT, T_INT, EA_OSPF_METRIC1); } ;
-dynamic_attr: OSPF_METRIC2 { $$ = f_new_dynamic_attr(EAF_TYPE_INT, T_INT, EA_OSPF_METRIC2); } ;
-dynamic_attr: OSPF_TAG { $$ = f_new_dynamic_attr(EAF_TYPE_INT, T_INT, EA_OSPF_TAG); } ;
-dynamic_attr: OSPF_ROUTER_ID { $$ = f_new_dynamic_attr(EAF_TYPE_ROUTER_ID, T_QUAD, EA_OSPF_ROUTER_ID); } ;
 
 CF_CLI_HELP(SHOW OSPF, ..., [[Show information about OSPF protocol]]);
 CF_CLI(SHOW OSPF, optproto, [<name>], [[Show information about OSPF protocol]])

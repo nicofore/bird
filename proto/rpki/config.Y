@@ -32,7 +32,7 @@ rpki_check_unused_transport(void)
 CF_DECLS
 
 CF_KEYWORDS(RPKI, REMOTE, BIRD, PRIVATE, PUBLIC, KEY, TCP, SSH, TRANSPORT, USER,
-	    RETRY, REFRESH, EXPIRE, KEEP)
+	    RETRY, REFRESH, EXPIRE, KEEP, IGNORE, MAX, LENGTH)
 
 %type <i> rpki_keep_interval
 
@@ -42,6 +42,7 @@ proto: rpki_proto ;
 
 rpki_proto_start: proto_start RPKI {
   this_proto = proto_config_new(&proto_rpki, $1);
+  this_proto->loop_order = DOMAIN_ORDER(proto);
   RPKI_CFG->retry_interval = RPKI_RETRY_INTERVAL;
   RPKI_CFG->refresh_interval = RPKI_REFRESH_INTERVAL;
   RPKI_CFG->expire_interval = RPKI_EXPIRE_INTERVAL;
@@ -79,6 +80,7 @@ rpki_proto_item:
      RPKI_CFG->expire_interval = $3;
      RPKI_CFG->keep_expire_interval = $2;
    }
+ | IGNORE MAX LENGTH bool { RPKI_CFG->ignore_max_length = $4; }
  ;
 
 rpki_keep_interval:

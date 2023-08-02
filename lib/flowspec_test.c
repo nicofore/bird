@@ -446,10 +446,7 @@ t_validation6(void)
 static int
 t_builder4(void)
 {
-  resource_init();
-
   struct flow_builder *fb = flow_builder_init(&root_pool);
-  linpool *lp = lp_new_default(&root_pool);
 
   /* Expectation */
 
@@ -492,7 +489,7 @@ t_builder4(void)
   flow_builder_set_type(fb, FLOW_TYPE_TCP_FLAGS);
   flow_builder_add_op_val(fb, 0, 0x55);
 
-  net_addr_flow4 *res = flow_builder4_finalize(fb, lp);
+  net_addr_flow4 *res = flow_builder4_finalize(fb, tmp_linpool);
 
   bt_assert(memcmp(res, expect, expect->length) == 0);
 
@@ -529,8 +526,6 @@ t_builder6(void)
 {
   net_addr_ip6 ip;
 
-  resource_init();
-  linpool *lp = lp_new_default(&root_pool);
   struct flow_builder *fb = flow_builder_init(&root_pool);
   fb->ipv6 = 1;
 
@@ -574,7 +569,7 @@ t_builder6(void)
   flow_builder_set_type(fb, FLOW_TYPE_LABEL);
   flow_builder_add_op_val(fb, 0, 0x55);
 
-  net_addr_flow6 *res = flow_builder6_finalize(fb, lp);
+  net_addr_flow6 *res = flow_builder6_finalize(fb, tmp_linpool);
   bt_assert(memcmp(res, expect, expect->length) == 0);
 
   /* Reverse order */
@@ -601,7 +596,7 @@ t_builder6(void)
   flow_builder_set_type(fb, FLOW_TYPE_DST_PREFIX);
   flow_builder6_add_pfx(fb, &ip, 61);
 
-  res = flow_builder6_finalize(fb, lp);
+  res = flow_builder6_finalize(fb, tmp_linpool);
   bt_assert(memcmp(res, expect, expect->length) == 0);
 
   return 1;
@@ -630,7 +625,7 @@ t_formatting4(void)
   net_addr_flow4 *input;
   NET_ADDR_FLOW4_(input, ip4_build(5, 6, 7, 0), 24, nlri);
 
-  const char *expect = "flow4 { dst 10.0.0.0/8; proto 23; dport > 24 && < 30 || 40..50,60..70,80 && >= 90; sport > 24 && < 30 || 40,50,60..70,80; icmp type 80; icmp code 90; tcp flags 0x3/0x3,0x0/0xc; length 0..65535; dscp 63; fragment dont_fragment || !is_fragment; }";
+  const char *expect = "flow4 { dst 10.0.0.0/8; proto 23; dport > 24 && < 30 || 40..50,60..70,80 && >= 90; sport > 24 && < 30 || 40,50,60..70,80; icmp type 80; icmp code 90; tcp flags 0x3/0x3 && 0x0/0xc; length 0..65535; dscp 63; fragment dont_fragment || !is_fragment; }";
 
   bt_assert(flow4_net_format(b, sizeof(b), input) == strlen(expect));
   bt_debug(" expect: '%s',\n output: '%s'\n", expect, b);
@@ -650,14 +645,14 @@ t_formatting6(void)
     FLOW_TYPE_SRC_PREFIX, 8, 0, 0xc0,
     FLOW_TYPE_NEXT_HEADER, 0x81, 0x06,
     FLOW_TYPE_PORT, 0x03, 20, 0x45, 40, 0x91, 0x01, 0x11,
-    FLOW_TYPE_LABEL, 0xa0, 0x12, 0x34, 0x56, 0x78,
+    FLOW_TYPE_LABEL, 0xa4, 0x00, 0x07, 0xa1, 0x20,
   };
   *nlri = (u8) sizeof(nlri);
 
   net_addr_flow6 *input;
   NET_ADDR_FLOW6_(input, ip6_build(0, 1, 0x12345678, 0x98000000), 103, nlri);
 
-  const char *expect = "flow6 { dst ::1:1234:5678:9800:0/103 offset 61; src c000::/8; next header 6; port 20..40,273; label !0x0/0x12345678; }";
+  const char *expect = "flow6 { dst ::1:1234:5678:9800:0/103 offset 61; src c000::/8; next header 6; port 20..40,273; label < 500000; }";
 
   bt_assert(flow6_net_format(b, sizeof(b), input) == strlen(expect));
   bt_debug(" expect: '%s',\n output: '%s'\n", expect, b);

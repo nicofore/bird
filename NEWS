@@ -1,3 +1,161 @@
+Version 3.0alpha2 (2023-05-11)
+  o Fixed memory leaks and use-after free bugs
+  o Simple thread work balancing
+  o MRT switched off
+  o Slow kernel route synchronization to be fixed later
+
+Version 3.0alpha1 (2023-04-18)
+  o Worker threads for BGP, Pipe, RPKI and BFD
+  o Configurable number of threads
+  o Asynchronous route export
+  o Flat attribute structure
+  o Inline import tables
+  o Export tables merged with BGP prefix / attribute buckets
+  o Fixed ROA check locking inversion in route table dumps
+  o MRT switched off
+
+Version 3.0-alpha0 (2022-02-07)
+  o Removal of fixed protocol-specific route attributes
+  o Asynchronous route export
+  o Explicit table import / export hooks
+  o Partially lockless route attribute cache
+  o Thread-safe resource management
+  o Thread-safe interface notifications
+  o Thread-safe protocol API
+  o Adoption of BFD IO loop for general use
+  o Parallel Pipe protocol
+  o Parallel RPKI protocol
+  o Parallel BGP protocol
+  o Lots of refactoring
+  o Bugfixes and improvements as they came along
+
+Version 2.0.12 (2023-01-23)
+  o Filter: New 'onlink' route attribute
+  o Compile-time option to use 4-way tries instead of 16-way ones
+  o BSD: Support for kernel route metric and other improvements
+  o Important bugfixes
+
+Version 2.0.11 (2022-11-12)
+  o BGP roles (RFC 9234)
+  o BGP: Keepalive time scaling
+  o BGP: New 'min hold time' and 'min keepalive time' options
+  o BGP: New 'next hop prefer global' option
+  o Filter: For loops and direct recursion
+  o Filter: Mixed declarations of local variables
+  o Filter: Improved static type checks
+  o Filter: Literal [] for empty set
+  o Linux: Netlink KRT improvements
+  o BSD: Experimental support for Netlink API
+  o Memory management improvements
+  o Many bugfixes
+
+  Notes:
+
+  In contrast to prior versions, configured keepalive time in BGP now scales
+  with negotiated hold time to maintain proportion between the keepalive time
+  and the hold time.
+
+  The Linux KRT was updated to use the recent API for IPv6 ECMP routes instead
+  of the legacy one. Consequently, the Linux versions older than 4.11 are no
+  longer supported, at least for IPv6 ECMP routes. Also, routing table scanning
+  now runs separately for each table to avoid congestion.
+
+  There is a minor change in recursive next hop processing. Previously,
+  recursive next hop must be resolved through a non-recursive route, now it must
+  be resolved through a prefix where both the best route and all routes with the
+  same preference (as the best route) are non-recursive. The old behavior might
+  lead in some corner cases to an infinite loop of recursive next hop resolution
+  due to a priority inversion.
+
+  There is a minor change in the 'configure undo' command, it is no longer
+  available after failed reconfiguration, as the old configuration is already
+  released.
+
+
+Version 2.0.10 (2022-06-16)
+  o BGP performance improvements
+  o BFD: New 'strict bind' option
+  o RPKI: VRF support
+  o Allow use of 240.0.0.0/4 as a private range
+  o BIRD client uses exit status to report errors
+  o Important bugfixes
+
+Version 2.0.9 (2022-02-09)
+  o BGP: Flowspec validation procedure
+  o Babel: MAC authentication support
+  o Routing table configuration blocks
+  o Optional prefix trie in routing table for faster LPM/interval queries
+  o CLI: New 'show route in <prefix>' command
+  o Filter: Faster (16-way) prefix sets
+  o Filter: MPLS label route attribute
+  o Filter: Operators to pick community components
+  o Filter: Operators to find minimum and maximum element of lists
+  o BGP: New 'free bind' option
+  o BGP: Log route updates that were changed to withdraws
+  o BGP: Improved 'invalid next hop' error reporting
+  o OSPF: Allow ifaces with host address as unnumbered PtP or PtMP ifaces
+  o OSPF: All packets on PtP networks should be sent to AllSPFRouters address
+  o Scripts for apkg-powered upstream packaging for deb and rpm
+  o Support for Blake2s and Blake2b hash functions
+  o Security keys / passwords can be entered in hexadecimal digits
+  o Memory statistics split into Effective and Overhead
+  o Linux: New option 'netlink rx buffer' to specify netlink socket buffer size
+  o BSD: Assume onlink flag on ifaces with only host addresses
+  o Many bugfixes
+
+  Notes:
+
+  For OSPF on PtP network, BIRD now sends all packets to multicast AllSPFRouters
+  address (as required in RFC 2328 8.1). This likely breaks setups with multiple
+  neighbors on a network configured as PtP, which worked in previous versions.
+  Such links should be configured as PtMP.
+
+  Since Linux 5.3, netlink socket can be flooded by route cache entries during
+  route table scan. This version mitigates that issue by using strict netlink
+  filtering.
+
+
+Version 2.0.8 (2021-03-18)
+  o Automatic channel reloads based on RPKI changes
+  o Multiple static routes with the same network
+  o Use bitmaps to keep track of exported routes
+  o Per-channel debug flags
+  o CLI commands show info from multiple protocols
+  o Linux: IPv4 routes with IPv6 nexthops
+  o Filter: Optimized redesign of prefix sets
+  o Filter: Improved type checking of user filters
+  o Filter: New src/dst accessors for Flowspec and SADR
+  o Filter: New 'weight' route attribute
+  o Filter: BGP path mask loop operator
+  o Filter: Remove quitbird command
+  o RIP: Demand circuit support (RFC 2091)
+  o BGP: New 'allow as sets' and 'enforce first as' options
+  o BGP: Support for BGP hostname capability
+  o BGP: Support for MD5SIG with dynamic BGP
+  o BFD: Optional separation of IPv4 / IPv6 BFD instances
+  o BFD: Per-peer session options
+  o RPKI: Allow build without libSSH
+  o RPKI: New 'ignore max length' option
+  o OSPF: Redesign of handling of unnumbered PtPs
+  o OSPF: Allow key id 0 in authentication
+  o Babel: Use onlink flag for routes with unreachable next hop
+  o Many bugfixes
+
+  Notes:
+
+  Automatic channel reloads based on RPKI changes are enabled by default,
+  but require import table enabled when used in BGP import filter.
+
+  BIRD now uses bitmaps to keep track of exported routes instead of
+  re-evaluation of export filters. That should improve speed and accuracy in
+  route export handling during reconfiguration, but takes some more memory.
+
+  Per-channel debug logging and some CLI commands (like 'show ospf neighbors')
+  defaulting to all protocol instances lead to some minor changes in log and
+  CLI output. Caution is recommended when logs or CLI output are monitored by
+  scripts.
+
+
 Version 2.0.7 (2019-10-11)
   o BGP: Accumulated IGP metric (RFC 7311)
   o Important filter reconfiguration bugfix
