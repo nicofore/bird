@@ -4474,6 +4474,18 @@ rt_feed_by_fib(void *data)
 
 	//RT_LOCKED(RT_PUB(SKIP_BACK(struct rtable_private, exporter, c->table)), tab)
 	//{
+	
+	while (!recalculate){
+		if (!atomic_exchange(&initrecalculate, 1) ){
+			pthread_mutex_t* temp = malloc(sizeof(pthread_mutex_t));
+			pthread_mutexattr_init(&attrrecalculate);
+			pthread_mutexattr_settype(&attrrecalculate, PTHREAD_MUTEX_RECURSIVE);
+			pthread_mutex_init(temp, &attrrecalculate);
+			recalculate = temp;
+		}
+	}
+
+	pthread_mutex_lock(recalculate);
 
 		FIB_ITERATE_START(&tab->fib, fit, net, n)
 		{
@@ -4491,6 +4503,7 @@ rt_feed_by_fib(void *data)
 		}
 		FIB_ITERATE_END;
 	//}
+	pthread_mutex_unlock(recalculate);
 
 	rt_process_feed(c, &block);
 	rt_feed_done(&c->h);
