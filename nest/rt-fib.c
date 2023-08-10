@@ -244,6 +244,21 @@ fib_rehash(struct fib *f, int step)
     t = ++n;
   }
   fib_ht_free(m);
+
+  for (u32 i = 0; i < f->hash_size; i++){
+    struct fib_node* n = f->hash_table[i];
+    while (n)
+    {
+      struct fib_iterator *it = n->readers;
+      while (it)
+      {
+        it->hash = i;
+        it = it->next;
+      }
+      n = n->next;
+    }
+  }
+    
   for (int i = 0; i < f->hash_size; i++)
     pthread_mutex_unlock(f->fib_locks[i]);
 }
@@ -694,6 +709,7 @@ fit_get(struct fib *f, struct fib_iterator *i)
 {
   struct fib_node *n;
   struct fib_iterator *j, *k;
+  pthread_mutex_lock(f->fib_locks[i->hash]);
 
   if (!i->prev)
   {
@@ -714,7 +730,7 @@ fit_get(struct fib *f, struct fib_iterator *i)
     k->prev = j;
   j->next = k;
   i->hash = fib_hash(f, n->addr);
-  pthread_mutex_lock(f->fib_locks[i->hash]);
+  
   return n;
 }
 
