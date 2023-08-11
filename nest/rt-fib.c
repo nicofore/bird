@@ -692,7 +692,7 @@ void fit_init(struct fib_iterator *i, struct fib *f)
         i->next->prev = i;
       n->readers = i;
       i->node = n;
-	  i->hash = h;
+	    i->hash = h;
       pthread_mutex_unlock(f->fib_locks[h]);
       return;
     }
@@ -701,7 +701,7 @@ void fit_init(struct fib_iterator *i, struct fib *f)
   /* The fib is empty, nothing to do */
   i->prev = i->next = NULL;
   i->node = NULL;
-  i->hash = 0;
+  i->hash = ~0-1;
 }
 
 struct fib_node *
@@ -709,7 +709,6 @@ fit_get(struct fib *f, struct fib_iterator *i)
 {
   struct fib_node *n;
   struct fib_iterator *j, *k;
-  pthread_mutex_lock(f->fib_locks[i->hash]);
 
   if (!i->prev)
   {
@@ -717,6 +716,11 @@ fit_get(struct fib *f, struct fib_iterator *i)
     i->hash = ~0 - 1;
     return NULL;
   }
+
+  pthread_mutex_lock(f->fib_locks[i->hash]);
+  u32 t = i->hash;
+
+  
   if (!(n = i->node))
   {
     /* No node info available, we are a victim of merging. Try harder. */
@@ -734,7 +738,7 @@ fit_get(struct fib *f, struct fib_iterator *i)
   return n;
 }
 
-void fit_put(struct fib_iterator *i, struct fib_node *n)
+void fit_put(struct fib_iterator *i, struct fib_node *n, u32 hpos)
 {
   struct fib_iterator *j;
 
@@ -744,6 +748,7 @@ void fit_put(struct fib_iterator *i, struct fib_node *n)
   i->next = j;
   n->readers = i;
   i->prev = (struct fib_iterator *)n;
+  i->hash = hpos;
 }
 
 void fit_put_next(struct fib *f, struct fib_iterator *i, struct fib_node *n, uint hpos)
@@ -761,7 +766,7 @@ void fit_put_next(struct fib *f, struct fib_iterator *i, struct fib_node *n, uin
   return;
 
 found:
-  fit_put(i, n);
+  fit_put(i, n, 0);
 }
 
 void fit_put_end(struct fib_iterator *i)

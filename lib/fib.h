@@ -87,7 +87,7 @@ void fib_check(struct fib *);                          /* Consistency check for 
 
 void fit_init(struct fib_iterator *, struct fib *); /* Internal functions, don't call */
 struct fib_node *fit_get(struct fib *, struct fib_iterator *);
-void fit_put(struct fib_iterator *, struct fib_node *);
+void fit_put(struct fib_iterator *, struct fib_node *, u32 hpos);
 void fit_put_next(struct fib *f, struct fib_iterator *i, struct fib_node *n, uint hpos);
 void fit_put_end(struct fib_iterator *i);
 void fit_copy(struct fib *f, struct fib_iterator *dst, struct fib_iterator *src);
@@ -105,8 +105,8 @@ void fit_copy(struct fib *f, struct fib_iterator *dst, struct fib_iterator *src)
       for (fn_ = *ff_++; z = fib_node_to_user(f_, fn_); fn_ = fn_->next)
 
 #define FIB_WALK_END \
-  if (count_) pthread_mutex_lock(f_->fib_locks[size-count_]); \
-  pthread_mutex_unlock(f_->fib_locks[size-count_-1]);\
+  if (count_){pthread_mutex_lock(f_->fib_locks[size-count_]); }\
+   pthread_mutex_unlock(f_->fib_locks[size-count_-1]);\
   }                  \
   }                  \
   while (0);
@@ -125,9 +125,11 @@ void fit_copy(struct fib *f, struct fib_iterator *dst, struct fib_iterator *src)
     {                                                \
       if (!fn_)                                      \
       {                                              \
-        if (hpos_+1< count_) pthread_mutex_lock(f_->fib_locks[hpos_+1]);\
+        if (hpos_+1< count_) { \
+          pthread_mutex_lock(f_->fib_locks[hpos_+1]);}\
         if (++hpos_ >= count_)                       \
           break;                                     \
+        \  
         pthread_mutex_unlock(f_->fib_locks[hpos_-1]);  \
         fn_ = (f_)->hash_table[hpos_];              \
         continue;                                    \
@@ -137,11 +139,11 @@ void fit_copy(struct fib *f, struct fib_iterator *dst, struct fib_iterator *src)
 #define FIB_ITERATE_END \
   fn_ = fn_->next;      \
   }                     \
-  if (hpos_ != ~0) pthread_mutex_unlock(f_->fib_locks[hpos_-1]); \
+  if (hpos_ != ~0) {  pthread_mutex_unlock(f_->fib_locks[hpos_-1]); }\
   }                     \
   while (0);
 
-#define FIB_ITERATE_PUT(it) fit_put(it, fn_); pthread_mutex_unlock(f_->fib_locks[hpos_]);
+#define FIB_ITERATE_PUT(it) fit_put(it, fn_, hpos_); pthread_mutex_unlock(f_->fib_locks[hpos_]);
 
 #define FIB_ITERATE_PUT_NEXT(it, fib) fit_put_next(fib, it, fn_, hpos_); pthread_mutex_unlock(f_->fib_locks[hpos_]);
 

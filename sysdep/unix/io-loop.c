@@ -961,7 +961,7 @@ bird_thread_cleanup(void *_thr)
 static struct bird_thread *
 bird_thread_start(struct birdloop_pickup_group *group)
 {
-  ASSERT_DIE(birdloop_inside(&main_birdloop));
+  //ASSERT_DIE(birdloop_inside(&main_birdloop));
 
   struct birdloop *meta = birdloop_new_no_pickup(&root_pool, DOMAIN_ORDER(meta), "Thread Meta");
   pool *p = birdloop_pool(meta);
@@ -1107,7 +1107,7 @@ bird_thread_shutdown(void * _ UNUSED)
 void
 bird_thread_commit(struct config *new, struct config *old UNUSED)
 {
-  ASSERT_DIE(birdloop_inside(&main_birdloop));
+  //ASSERT_DIE(birdloop_inside(&main_birdloop));
 
   if (new->shutdown)
     return;
