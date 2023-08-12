@@ -683,8 +683,9 @@ void fit_init(struct fib_iterator *i, struct fib *f)
   struct fib_node *n;
 
   i->efef = 0xff;
+  pthread_mutex_lock(f->fib_locks[0]);
   for (h = 0; h < f->hash_size; h++){
-    pthread_mutex_lock(f->fib_locks[h]);
+    
     if (n = f->hash_table[h])
     {
       i->prev = (struct fib_iterator *)n;
@@ -696,6 +697,7 @@ void fit_init(struct fib_iterator *i, struct fib *f)
       pthread_mutex_unlock(f->fib_locks[h]);
       return;
     }
+    if (h != f->hash_size-1) pthread_mutex_lock(f->fib_locks[h+1]);
     pthread_mutex_unlock(f->fib_locks[h]);
   }
   /* The fib is empty, nothing to do */
